@@ -29,11 +29,13 @@ DEFAULT_CONFIG = {
     },
     "episode_title_language": "cn",
     "title_source": "cn",
-    "season_episode_format": "sXXeYY",
+    "season_episode_format": "auto",
     "video_extensions": [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".ts"],
     "subtitle_extensions": [".ass", ".ssa", ".srt", ".sub", ".idx", ".sup", ".vtt"],
     "custom_video_extensions": "",
     "custom_subtitle_extensions": "",
+    "sidebar_width": 240,
+    "column_widths": [70, 84, 84, 400, 300],
 }
 
 def get_config_dir():

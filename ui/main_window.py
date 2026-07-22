@@ -22,7 +22,7 @@ from ui.file_list import FileListWidget
 from ui.settings_panel import SettingsPanel
 from ui.theme import theme_manager
 from ui.styles import get_stylesheet
-from utils.config import load_config, save_config
+from utils.config import load_config, save_config, set_config
 
 
 class RecognizeWorker(QThread):
@@ -114,6 +114,10 @@ class MainWindow(QMainWindow):
         self._skip_candidates_fetch = False # 通过下拉框重选时跳过候选获取
 
         self.setAcceptDrops(True)
+
+        # 从配置恢复侧边栏宽度
+        config = load_config()
+        self._sidebar_width = config.get("sidebar_width", 240)
 
         self._setup_ui()
         self._apply_theme()
@@ -522,6 +526,8 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         theme_manager.theme_changed.connect(self._on_theme_changed)
         self.settings_panel.settings_changed.connect(self._on_settings_changed)
+        # 文件列表列宽变化时保存
+        self.file_list.column_widths_changed.connect(self._on_column_widths_changed)
         # 防抖定时器：设置变更后 500ms 才重新生成名称
         self._settings_debounce = QTimer()
         self._settings_debounce.setSingleShot(True)
@@ -541,6 +547,10 @@ class MainWindow(QMainWindow):
             self.settings_panel.refresh_theme()
         if hasattr(self, 'file_list') and self.file_list:
             self.file_list.refresh_theme()
+
+    def _on_column_widths_changed(self, widths):
+        """列宽拖拽变化时保存到配置"""
+        set_config("column_widths", widths)
 
     def _on_settings_changed(self):
         """设置变更时启动防抖定时器"""
@@ -644,7 +654,15 @@ class MainWindow(QMainWindow):
 
     def _on_splitter_moved(self, pos, index):
         self._sidebar_width = self.sidebar.width()
+        set_config("sidebar_width", self._sidebar_width)
         self._refresh_avatar()
+
+    def closeEvent(self, event):
+        """关闭窗口时保存布局状态"""
+        set_config("sidebar_width", self._sidebar_width)
+        if hasattr(self, 'file_list') and self.file_list:
+            self.file_list.save_column_widths()
+        super().closeEvent(event)
 
     # ══════════════════════════════════════════════════════════
     #  全域拖拽
@@ -743,6 +761,7 @@ class MainWindow(QMainWindow):
         if self.subtitle_files:
             try:
                 sub_matches = match_subtitles_to_videos(self.video_files, self.subtitle_files)
+                matched_subs = set()
                 for vf, sf in sub_matches:
                     v_idx = None
                     for idx, item in enumerate(self.rename_items):
@@ -754,6 +773,19 @@ class MainWindow(QMainWindow):
                             file_path=str(sf.path),
                             old_name=sf.filename,
                             parsed_info=self.parsed_infos[v_idx],
+                            status="pending",
+                            is_subtitle_match=True
+                        )
+                        self.rename_items.append(sub_item)
+                        matched_subs.add(sf)
+                # 未匹配的字幕也加入，独立解析
+                for sf in self.subtitle_files:
+                    if sf not in matched_subs:
+                        sub_info = parse_filename(sf.stem)
+                        sub_item = RenameItem(
+                            file_path=str(sf.path),
+                            old_name=sf.filename,
+                            parsed_info=sub_info,
                             status="pending",
                             is_subtitle_match=True
                         )
@@ -864,6 +896,10 @@ class MainWindow(QMainWindow):
                     episode_title = anime_info.get_episode_title(item.parsed_info.episode, ep_lang)
                     new_name = self._generate_new_name(item, show_title, episode_title, template)
                     if new_name:
+                        # 如果生成的名字和原名一样，跳过
+                        if new_name == item.old_name:
+                            item.status = "ready"
+                            continue
                         item.new_name = new_name
                         item.anime_info = anime_info
                         item.status = "ready"
@@ -946,8 +982,15 @@ class MainWindow(QMainWindow):
     def _generate_new_name(self, item, show_title, episode_title, template):
         pi = item.parsed_info
         config = load_config()
-        se_format = config.get("season_episode_format", "sXXeYY")
+        se_format = config.get("season_episode_format", "auto")
         se_str = get_season_episode_str(pi, fmt=se_format)
+
+        # 如果 show_title 末尾已含集标题，用正则剥离（兼容 - / -- / — 等分隔符）
+        if episode_title and episode_title.strip():
+            et = re_mod.escape(episode_title.strip())
+            show_title = re_mod.sub(r'\s*[-–—]+\s*' + et + r'$', '', show_title).rstrip()
+            # 也处理无分隔符紧跟的情况
+            show_title = re_mod.sub(r'\s+' + et + r'$', '', show_title).rstrip()
 
         base_name = template.replace("{title}", show_title)
         base_name = base_name.replace("{season_episode}", se_str)
@@ -997,23 +1040,38 @@ class MainWindow(QMainWindow):
         """离线生成新名称（不依赖联网搜索，基于解析的标题和集数）"""
         config = load_config()
         template = config.get("naming_template", "{title} - {season_episode} {episode_title}")
-        title_source = config.get("title_source", "cn")
 
         for item in self.rename_items:
             if item.status == "ready" or item.status == "done":
+                continue
+            # 已有有效 new_name 的项不再重新生成
+            if item.new_name and item.status not in ("pending",):
+                item.status = "ready"
                 continue
 
             pi = item.parsed_info
             if not pi:
                 continue
 
-            # 使用解析出的原标题
-            show_title = pi.show_title if pi.show_title else Path(item.old_name).stem
+            old_stem = Path(item.old_name).stem
 
-            # 离线没有每集标题
+            # 使用解析出的原标题
+            show_title = pi.show_title if pi.show_title else old_stem
+
+            # 离线没有每集标题 — 尝试从 show_title 末尾提取
             episode_title = ""
+            m = re_mod.search(r'\s+[-–—]+\s+(.+)$', show_title)
+            if m:
+                show_title = show_title[:m.start()].strip()
+                episode_title = m.group(1).strip()
 
             new_name = self._generate_new_name(item, show_title, episode_title, template)
+
+            # 如果生成的名字和原名一样，跳过
+            if new_name == item.old_name:
+                item.status = "ready"
+                continue
+
             item.new_name = new_name
             item.new_path = Path(item.old_path).parent / new_name if item.old_path else None
             item.status = "ready"

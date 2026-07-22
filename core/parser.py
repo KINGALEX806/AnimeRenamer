@@ -24,6 +24,7 @@ class ParsedInfo:
         self.extra_tags = []          # 其他标签
         self.is_multi_episode = False # 是否多集文件
         self.confidence = 0.0         # 解析置信度
+        self.se_pattern = "sXXeYY"    # 原始季集格式: sXXeYY, [##], EP##, - ##, ##, etc.
 
     def __repr__(self):
         return f"ParsedInfo({self.show_title} S{self.season:02d}E{self.episode:02d})"
@@ -318,7 +319,55 @@ def parse_filename(filename):
     if lang_match and not info.audio_info:
         info.language_tag = f"[{lang_match.group(1)}]"
 
+    # 检测原始季集格式
+    info.se_pattern = _detect_se_pattern(original_name, info)
+
     return info
+
+
+def _detect_se_pattern(filename, info):
+    """从原始文件名中检测季集格式"""
+    # 去掉扩展名
+    name = filename
+    for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts',
+                '.ass', '.ssa', '.srt', '.sub', '.idx', '.sup', '.vtt']:
+        if name.lower().endswith(ext):
+            name = name[:-len(ext)]
+            break
+    # 去掉字幕语言标签
+    name = re.sub(r'\.(sc|tc|chs|cht|ch|en|jp|jap|eng|chi|zh)(\s*[&+]\s*(jp|jap|en|eng|cht|chs|tc|sc))*$',
+                  '', name, flags=re.IGNORECASE)
+
+    # 1. S01E01 格式
+    if re.search(r'[Ss]\d{1,2}\s*[Ee]\d{1,3}', name):
+        return "sXXeYY"
+
+    # 2. [01] 方括号格式
+    if re.search(r'\[\d{1,3}\]', name):
+        return "[##]"
+
+    # 3. #01 井号格式
+    if re.search(r'#\d{1,3}', name):
+        return "#01"
+
+    # 4. EP01 格式
+    if re.search(r'[Ee][Pp]\d{1,3}', name):
+        return "EP01"
+
+    # 5. 第01话 / 第01集 格式
+    if re.search(r'第\d{1,3}[话話集]', name):
+        return "第01话"
+
+    # 6.  - 01 破折号格式
+    if re.search(r'\s-\s\d{1,3}', name):
+        return " - 01"
+
+    # 7. 纯数字 01 格式
+    if re.search(r'(?:^|\s)\d{1,3}(?:\s|$)', name):
+        return "01"
+
+    # 默认
+    return "sXXeYY"
 
 
 def _clean_title(title):
@@ -333,20 +382,47 @@ def _clean_title(title):
 
 def get_season_episode_str(info, fmt="sXXeYY"):
     """获取季数集数字符串
-    fmt: "sXXeYY" (默认 S01E01), "number" (纯数字 01)
+    fmt: "sXXeYY" (S01E01), "number" (01), "auto" (根据原始文件格式)
     """
     if info.episode_type == "Movie":
         return f"({info.year})" if info.year else "(Movie)"
     elif info.episode_type in ("OVA", "SP"):
         if fmt == "number":
             return f"{info.episode_type}{info.episode:02d}"
+        if fmt == "auto":
+            fmt = info.se_pattern if hasattr(info, 'se_pattern') else "sXXeYY"
         return f"{info.episode_type}{info.episode:02d}"
     else:
-        if fmt == "number":
+        # 自动模式：使用原始文件检测到的格式
+        if fmt == "auto":
+            fmt = info.se_pattern if hasattr(info, 'se_pattern') else "sXXeYY"
+
+        if fmt == "number" or fmt == "01":
             if info.is_multi_episode and info.episode_end:
                 return f"{info.episode:02d}-{info.episode_end:02d}"
             return f"{info.episode:02d}"
+        elif fmt == "[##]":
+            if info.is_multi_episode and info.episode_end:
+                return f"[{info.episode:02d}-{info.episode_end:02d}]"
+            return f"[{info.episode:02d}]"
+        elif fmt == "#01":
+            if info.is_multi_episode and info.episode_end:
+                return f"#{info.episode:02d}-{info.episode_end:02d}"
+            return f"#{info.episode:02d}"
+        elif fmt == "EP01":
+            if info.is_multi_episode and info.episode_end:
+                return f"EP{info.episode:02d}-{info.episode_end:02d}"
+            return f"EP{info.episode:02d}"
+        elif fmt == " - 01":
+            if info.is_multi_episode and info.episode_end:
+                return f" - {info.episode:02d}-{info.episode_end:02d}"
+            return f" - {info.episode:02d}"
+        elif fmt == "第01话":
+            if info.is_multi_episode and info.episode_end:
+                return f"第{info.episode:02d}-{info.episode_end:02d}话"
+            return f"第{info.episode:02d}话"
         else:
+            # sXXeYY 默认
             if info.is_multi_episode and info.episode_end:
                 return f"S{info.season:02d}E{info.episode:02d}-E{info.episode_end:02d}"
             return f"S{info.season:02d}E{info.episode:02d}"

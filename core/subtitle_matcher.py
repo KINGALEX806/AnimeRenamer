@@ -1,210 +1,147 @@
-"""SubRenamer 风格字幕-视频匹配算法
-
-参考 https://github.com/qwqcode/SubRenamer 的核心算法实现：
-1. 自动 Diff 算法：提取公共前缀/后缀，计算集数 Key
-2. 同名优先：完全相同的文件名（去扩展名）直接匹配
-3. 一对多映射：同一 Key 下，一个视频可匹配多个字幕
-4. 自然排序：数字部分按数值排序
+"""字幕 - 视频匹配模块
+三阶段匹配:
+  1. 精确名称匹配（剥离语言标签后）
+  2. Diff 算法提取公共前缀/后缀匹配
+  3. Episode 编号匹配（最稳健的兜底方案）
 """
-import re
-import unicodedata
 from pathlib import Path
+from core.parser import parse_filename
 
 
-def normalize_filename(name):
-    """Unicode NFKC 规范化"""
-    return unicodedata.normalize("NFKC", name)
+def _strip_subtitle_lang_tag(stem: str) -> str:
+    """剥离字幕语言标签，如 .sc, .chs, .cht, .tc, .en, .ja 等"""
+    import re
+    # 匹配末尾的 .语言标签(可能带数字或连字符)
+    return re.sub(r'[._-](sc|chs|cht|tc|en|ja|ko|fr|de|es|pt|ru|ar|hi|th|vi|id|ms|default|forced|sdh|hi|cc|简|繁|简体|繁體|chs_en|cht_en|jp_sc|jp_tc|sc_en|tc_en)$', '', stem, flags=re.IGNORECASE)
 
 
-def _strip_subtitle_lang_tag(stem):
-    """去除字幕语言标签后缀，如 .sc / .tc / .chs&jp / .CHS 等"""
-    return re.sub(
-        r'\.(sc|tc|chs|cht|ch|en|jp|jap|eng|chi|zh)(\s*[&+]\s*(jp|jap|en|eng|cht|chs|tc|sc))*$',
-        '', stem, flags=re.IGNORECASE
-    )
-
-
-def match_subtitles_to_videos(video_files, subtitle_files):
-    """将字幕文件匹配到视频文件
-
-    Args:
-        video_files: MediaFile 列表 (type='video')
-        subtitle_files: MediaFile 列表 (type='subtitle')
-
-    Returns:
-        list of (video_mediafile, subtitle_mediafile) 匹配对
+def match_subtitles_to_videos(video_files: list, subtitle_files: list):
+    """将字幕文件匹配到对应的视频文件
+    
+    返回: list of (video_path, subtitle_path) 已匹配对
     """
-    if not video_files or not subtitle_files:
+    if not subtitle_files or not video_files:
         return []
 
-    # 1对1快速路径
-    if len(video_files) == 1 and len(subtitle_files) == 1:
-        return [(video_files[0], subtitle_files[0])]
-
-    # 提取文件名（去扩展名、规范化）
-    video_stems = [normalize_filename(vf.stem) for vf in video_files]
-    sub_stems = [normalize_filename(sf.stem) for sf in subtitle_files]
-
-    # 去除字幕语言标签后缀，用于匹配
+    # 预处理：提取所有 stems
+    video_stems = [vf.stem for vf in video_files]
+    sub_stems = [sf.stem for sf in subtitle_files]
     sub_stems_clean = [_strip_subtitle_lang_tag(s) for s in sub_stems]
 
-    # 分离已精确匹配的
-    matched_pairs = []
-    remaining_videos = []
-    remaining_subs = []
+    # 构建视频 stem 查找表（小写）
+    video_stems_lower = {}
+    for vf, stem in zip(video_files, video_stems):
+        video_stems_lower[stem.lower()] = vf
 
-    # 同名优先匹配（使用 clean stem）
-    video_stems_lower = {s.lower(): vf for s, vf in zip(video_stems, video_files)}
-    for sf, stem, clean_stem in zip(subtitle_files, sub_stems, sub_stems_clean):
+    matched_pairs = []
+    used_videos = set()
+    used_subs = set()
+
+    # =============================================
+    # 阶段 1: 精确名称匹配
+    # =============================================
+    for i, (sf, clean_stem) in enumerate(zip(subtitle_files, sub_stems_clean)):
         if clean_stem.lower() in video_stems_lower:
             matched_vf = video_stems_lower[clean_stem.lower()]
             matched_pairs.append((matched_vf, sf))
-        else:
-            remaining_subs.append((sf, clean_stem))
+            used_videos.add(matched_vf)
+            used_subs.add(i)
 
-    for vf, stem in zip(video_files, video_stems):
-        if stem.lower() not in {s.lower() for _, s in remaining_subs}:
-            if vf not in [p[0] for p in matched_pairs]:
-                remaining_videos.append((vf, stem))
+    # 收集剩余文件
+    remaining_videos = [(vf, stem) for vf, stem in zip(video_files, video_stems) if vf not in used_videos]
+    remaining_subs = [(i, sf, clean_stem) for i, (sf, clean_stem) in enumerate(zip(subtitle_files, sub_stems_clean)) if i not in used_subs]
 
-    # 如果剩余的都匹配完了，直接返回
-    if not remaining_videos or not remaining_subs:
-        return matched_pairs
+    # =============================================
+    # 阶段 2: Diff 算法匹配
+    # =============================================
+    if remaining_videos and remaining_subs:
+        # 计算视频公共前缀/后缀
+        rv_stems = [s for _, s in remaining_videos]
+        common_prefix = _common_prefix(rv_stems)
+        common_suffix = _common_suffix(rv_stems)
 
-    # 计算 Key（Diff 算法）
-    video_keys = _calculate_keys([stem for _, stem in remaining_videos])
-    sub_keys = _calculate_keys([stem for _, stem in remaining_subs])
+        # 视频的有效键
+        video_keys = []
+        for vf, s in remaining_videos:
+            key = s[len(common_prefix):len(s) - len(common_suffix)].strip()
+            video_keys.append((vf, key))
 
-    # 按 Key 匹配
-    for (vf, v_stem), v_key in zip(remaining_videos, video_keys):
-        for (sf, s_stem), s_key in zip(remaining_subs, sub_keys):
-            if v_key and s_key and v_key == s_key:
+        # 字幕公共前缀/后缀
+        rs_stems = [s for _, _, s in remaining_subs]
+        sub_prefix = _common_prefix(rs_stems)
+        sub_suffix = _common_suffix(rs_stems)
+
+        sub_keys = []
+        for i, sf, s in remaining_subs:
+            key = s[len(sub_prefix):len(s) - len(sub_suffix)].strip()
+            sub_keys.append((i, sf, key))
+
+        # 匹配键
+        for vf, vk in video_keys:
+            if vf in used_videos:
+                continue
+            vk_lower = vk.lower()
+            for (i, sf, sk) in sub_keys:
+                if i in used_subs:
+                    continue
+                if sk.lower() == vk_lower:
+                    matched_pairs.append((vf, sf))
+                    used_videos.add(vf)
+                    used_subs.add(i)
+                    break
+
+    # =============================================
+    # 阶段 3: Episode 编号匹配（兜底）
+    # =============================================
+    remaining_videos_2 = [(vf, stem) for vf, stem in zip(video_files, video_stems) if vf not in used_videos]
+    remaining_subs_2 = [(i, sf, stem) for i, (sf, stem) in enumerate(zip(subtitle_files, sub_stems)) if i not in used_subs]
+
+    if remaining_videos_2 and remaining_subs_2:
+        # 解析所有剩余文件的 episode 信息
+        video_episodes = {}
+        for vf, stem in remaining_videos_2:
+            info = parse_filename(stem)
+            if info:
+                ep_key = (info.season, info.episode, info.episode_end)
+                if ep_key and ep_key[1] is not None:
+                    video_episodes[ep_key] = vf
+
+        sub_episodes = []
+        for i, sf, stem in remaining_subs_2:
+            info = parse_filename(stem)
+            if info:
+                ep_key = (info.season, info.episode, info.episode_end)
+                if ep_key and ep_key[1] is not None:
+                    sub_episodes.append((i, sf, ep_key))
+
+        # 匹配
+        for i, sf, ep_key in sub_episodes:
+            if ep_key in video_episodes:
+                vf = video_episodes[ep_key]
                 matched_pairs.append((vf, sf))
-                break
+                used_videos.add(vf)
+                used_subs.add(i)
 
     return matched_pairs
 
 
-def _calculate_keys(stems):
-    """计算文件名 Key（集数标识符）
-
-    使用 SubRenamer 的 Diff 算法提取每个文件的集数标识符。
-    """
-    n = len(stems)
-    if n < 2:
-        return [_fallback_key(stems[0])] if stems else []
-
-    # 计算公共前缀和后缀
-    prefix, suffix = _get_diff(stems)
-
-    # 构建正则并提取 Key
-    keys = []
-    for stem in stems:
-        key = _extract_key(stem, prefix, suffix)
-        keys.append(_patch_key(key))
-
-    return keys
+def _common_prefix(strings: list) -> str:
+    """计算字符串列表的公共前缀"""
+    if not strings:
+        return ""
+    result = strings[0]
+    for s in strings[1:]:
+        while not s.lower().startswith(result.lower()) and result:
+            result = result[:-1]
+    return result
 
 
-def _get_diff(stems):
-    """计算公共前缀和后缀
-
-    从列表两端取文件名进行 Diff，选择差异最大的文件对。
-    """
-    n = len(stems)
-    if n < 2:
-        return "", ""
-
-    # 从两端取：第一个和最后一个
-    first = stems[0].lower()
-    last = stems[-1].lower()
-
-    # 找公共前缀（去掉末尾数字）
-    prefix = _find_common_prefix(first, last)
-    if prefix:
-        prefix = re.sub(r"\d+$", "", prefix)
-
-    # 找公共后缀
-    suffix = ""
-    if prefix:
-        # 从前缀之后开始找
-        start = len(prefix)
-        suffix = _find_common_suffix(first[start:], last[start:])
-
-    return prefix, suffix
-
-
-def _find_common_prefix(a, b):
-    """找最长公共前缀（大小写不敏感）"""
-    min_len = min(len(a), len(b))
-    i = 0
-    while i < min_len and a[i].lower() == b[i].lower():
-        i += 1
-    return a[:i]
-
-
-def _find_common_suffix(a, b):
-    """找公共后缀
-
-    白名单：只有非 ASCII 字母数字的字符才能作为后缀。
-    跳过 ASCII 字母和数字，因为它们可能是集数 Key 的一部分。
-    """
-    a_len = len(a)
-    b_len = len(b)
-    result = []
-    a_idx = a_len - 1
-    b_idx = b_len - 1
-
-    while a_idx >= 0 and b_idx >= 0:
-        if a[a_idx].lower() == b[b_idx].lower():
-            ch = a[a_idx]
-            # 白名单：非 ASCII 字母数字，或空格
-            if not ch.isascii() or not ch.isalnum() or ch == ' ':
-                result.insert(0, ch)
-                a_idx -= 1
-                b_idx -= 1
-            else:
-                break
-        else:
-            break
-
-    return ''.join(result)
-
-
-def _extract_key(stem, prefix, suffix):
-    """根据 Diff 结果提取 Key"""
-    if not prefix:
-        return _fallback_key(stem)
-
-    # 构建正则
-    escaped_prefix = re.escape(prefix)
-    if suffix:
-        escaped_suffix = re.escape(suffix)
-        pattern = f"{escaped_prefix}(.+?){escaped_suffix}"
-    else:
-        pattern = f"{escaped_prefix}(\\d+)"
-
-    m = re.search(pattern, stem, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    return _fallback_key(stem)
-
-
-def _fallback_key(stem):
-    """回退：匹配最后一个数字"""
-    m = re.search(r"(\d+)(?!.*\d)", stem)
-    if m:
-        return m.group(1)
-    return ""
-
-
-def _patch_key(key):
-    """Key 规范化：纯数字去前导零"""
-    if key and key.isdigit():
-        return str(int(key))
-    return key
-
-
-def _natural_sort_key(s):
-    """自然排序 key"""
-    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+def _common_suffix(strings: list) -> str:
+    """计算字符串列表的公共后缀"""
+    if not strings:
+        return ""
+    result = strings[0]
+    for s in strings[1:]:
+        while not s.lower().endswith(result.lower()) and result:
+            result = result[1:]
+    return result
