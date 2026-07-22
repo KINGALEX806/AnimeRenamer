@@ -2,6 +2,7 @@
 import os
 import re as re_mod
 import subprocess
+import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -23,6 +24,15 @@ from ui.settings_panel import SettingsPanel
 from ui.theme import theme_manager
 from ui.styles import get_stylesheet
 from utils.config import load_config, save_config, set_config
+
+
+def _resolve_asset(filename):
+    """解析资源路径，兼容 PyInstaller 打包和开发环境"""
+    if getattr(sys, 'frozen', False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, filename)
 
 
 class RecognizeWorker(QThread):
@@ -97,6 +107,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("AnimeRenamer — \u756A\u5267\u91CD\u547D\u540D\u5DE5\u5177")
         self.setMinimumSize(1100, 700)
         self.resize(1300, 820)
+
+        # 设置窗口图标
+        icon_path = _resolve_asset("AnimeRenamer-new.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         self.rename_engine = RenameEngine(log_callback=self._log)
         self.rename_items = []
@@ -284,9 +299,14 @@ class MainWindow(QMainWindow):
             """)
 
     def _avatar_size(self):
-        w = self._sidebar_width
-        size = int(w * 0.95) - 4
-        size = max(80, min(280, size))
+        # 优先读 sidebar 实际宽度，构建阶段或未显示时回退到 _sidebar_width
+        if hasattr(self, 'sidebar') and self.sidebar and self.sidebar.width() > 0:
+            w = self.sidebar.width()
+        else:
+            w = self._sidebar_width
+        size = int(w * 0.88) - 2
+        # 放宽上限，让宽侧边栏时头像能更大
+        size = max(80, min(360, size))
         return size
 
     def _on_avatar_click(self, event):
@@ -343,56 +363,72 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 8, 16, 8)
         layout.setSpacing(0)
 
-        # 顶部行：标题 + 搜索按钮
+        # 顶部行：标题 + 搜索控件
         header_row = QHBoxLayout()
-        header_row.setContentsMargins(18, 4, 18, 8)
+        header_row.setContentsMargins(0, 4, 0, 8)
 
+        # 左侧区域（等宽拉伸，与右侧对称）
+        left_section = QWidget()
+        left_layout = QHBoxLayout(left_section)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         table_title = QLabel("\u6587\u4EF6\u9884\u89C8")
         table_title.setObjectName("sectionTitle")
-        header_row.addWidget(table_title)
-        header_row.addStretch()
+        left_layout.addWidget(table_title)
+        left_layout.addStretch()
+        header_row.addWidget(left_section, 1)
 
-        # 🔍 搜索每集标题 按钮 — 右上角
-        self.search_episodes_btn = QPushButton("🔍 搜索每集标题")
-        self.search_episodes_btn.setObjectName("smallBtn")
-        self.search_episodes_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.search_episodes_btn.clicked.connect(self._start_recognition)
-        self.search_episodes_btn.setEnabled(False)
-        self.search_episodes_btn.setVisible(False)
-        header_row.addWidget(self.search_episodes_btn)
-
-        # 手动搜索关键词输入框
+        # 手动搜索关键词输入框 — 居中
         self.search_keyword_input = QLineEdit()
         self.search_keyword_input.setPlaceholderText("手动输入搜索关键词...")
         self.search_keyword_input.setObjectName("searchKeywordInput")
-        self.search_keyword_input.setFixedWidth(180)
-        self.search_keyword_input.setVisible(False)
+        self.search_keyword_input.setFixedWidth(200)
         self.search_keyword_input.returnPressed.connect(self._start_recognition)
-        header_row.addWidget(self.search_keyword_input)
+        header_row.addWidget(self.search_keyword_input, 0)
+
+        # 右侧区域（等宽拉伸，与左侧对称）
+        right_section = QWidget()
+        right_layout = QHBoxLayout(right_section)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addStretch()
 
         # 搜索结果选择下拉框
         self.search_result_combo = QComboBox()
         self.search_result_combo.setObjectName("searchResultCombo")
         self.search_result_combo.setFixedWidth(220)
-        self.search_result_combo.setVisible(False)
         self.search_result_combo.setToolTip("选择搜索结果，点击重新识别")
         self.search_result_combo.currentIndexChanged.connect(self._on_search_result_selected)
-        header_row.addWidget(self.search_result_combo)
+        self.search_result_combo.addItem("— 选择搜索结果（点击切换）—", None)
+        right_layout.addWidget(self.search_result_combo)
+        right_layout.addSpacing(8)
 
+        # 🔍 搜索每集标题 按钮 — 最右侧
+        self.search_episodes_btn = QPushButton("🔍 搜索每集标题")
+        self.search_episodes_btn.setObjectName("smallBtn")
+        self.search_episodes_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.search_episodes_btn.clicked.connect(self._start_recognition)
+        self.search_episodes_btn.setEnabled(False)
+        right_layout.addWidget(self.search_episodes_btn)
+
+        header_row.addWidget(right_section, 1)
+
+        layout.addLayout(header_row)
+
+        # 进度条行（仅在搜索时显示）
+        self.progress_row = QHBoxLayout()
+        self.progress_row.setContentsMargins(0, 0, 0, 0)
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(4)
         self.progress_bar.setFixedWidth(160)
-        header_row.addWidget(self.progress_bar)
-        header_row.addSpacing(8)
-
+        self.progress_row.addWidget(self.progress_bar)
+        self.progress_row.addSpacing(8)
         self.progress_label = QLabel("")
         self.progress_label.setObjectName("hintLabel")
         self.progress_label.setVisible(False)
-        header_row.addWidget(self.progress_label)
-
-        layout.addLayout(header_row)
+        self.progress_row.addWidget(self.progress_label)
+        self.progress_row.addStretch()
+        layout.addLayout(self.progress_row)
 
         # 表格
         table_container = QWidget()
@@ -408,7 +444,7 @@ class MainWindow(QMainWindow):
 
         # 底部操作栏
         bottom_row = QHBoxLayout()
-        bottom_row.setContentsMargins(18, 8, 18, 4)
+        bottom_row.setContentsMargins(0, 8, 0, 4)
 
         # 📂 选择文件夹 + 打开文件夹 — 左下角
         self.select_folder_btn = QPushButton("📂 选择文件夹")
@@ -625,11 +661,9 @@ class MainWindow(QMainWindow):
         has_any = len(self.rename_items) > 0
         self.preview_btn.setEnabled(has_any)
 
-        # 搜索按钮状态
+        # 搜索按钮状态 — 始终可用，不再隐藏
         has_parsed = len(self.parsed_infos) > 0
-        self.search_episodes_btn.setVisible(has_parsed)
         self.search_episodes_btn.setEnabled(has_parsed)
-        self.search_keyword_input.setVisible(has_parsed)
 
         # 打开文件夹按钮
         self.open_folder_btn.setEnabled(self.current_folder is not None)
@@ -823,10 +857,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "\u63D0\u793A", "\u8BF7\u5148\u9009\u62E9\u6587\u4EF6\u5939\u52A0\u8F7D\u6587\u4EF6\u5217\u8868\u3002")
             return
 
-        # 防止重复点击
+        # 防止重复点击和快速连续点击闪退
         if hasattr(self, '_recognition_running') and self._recognition_running:
             self._log("搜索正在进行中，请等待完成...")
             return
+
+        # 先终止上一个 worker，断开信号
+        if hasattr(self, 'worker') and self.worker is not None:
+            try:
+                self.worker.progress.disconnect(self._on_recognition_progress)
+                self.worker.log.disconnect(self._log)
+                self.worker.finished.disconnect(self._on_recognition_finished)
+            except (TypeError, RuntimeError):
+                pass
+            self.worker.quit()
+            self.worker = None
+
         self._recognition_running = True
 
         config = load_config()
@@ -840,7 +886,6 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self._on_recognition_finished)
         self.worker.start()
 
-        self.search_result_combo.setVisible(False)
         self.progress_bar.setVisible(True)
         self.progress_label.setVisible(True)
         self.search_episodes_btn.setEnabled(False)
@@ -853,7 +898,8 @@ class MainWindow(QMainWindow):
         self.qt_status_bar.showMessage(f"\u8BC6\u522B\u4E2D: {current}/{total} — {message}")
 
     def _on_recognition_finished(self, results):
-        self._recognition_running = False
+        if not self._recognition_running:
+            return  # 旧 worker 的残留信号，忽略
         self.progress_bar.setVisible(False)
         self.progress_label.setVisible(False)
         self.search_episodes_btn.setEnabled(True)
@@ -871,10 +917,20 @@ class MainWindow(QMainWindow):
         # 获取搜索候选列表，填充下拉框
         if self._current_search_title and not self._skip_candidates_fetch:
             config = load_config()
+            # 终止旧 candidates worker
+            if hasattr(self, 'candidates_worker') and self.candidates_worker is not None:
+                try:
+                    self.candidates_worker.log.disconnect(self._log)
+                    self.candidates_worker.finished.disconnect(self._on_candidates_fetched)
+                except (TypeError, RuntimeError):
+                    pass
+                self.candidates_worker = None
             self.candidates_worker = SearchCandidatesWorker(self._current_search_title, config)
             self.candidates_worker.log.connect(self._log)
             self.candidates_worker.finished.connect(self._on_candidates_fetched)
             self.candidates_worker.start()
+        else:
+            self._recognition_running = False
         self._skip_candidates_fetch = False
 
     def _apply_recognition_results(self, results):
@@ -892,8 +948,27 @@ class MainWindow(QMainWindow):
                     if title_source == "original":
                         show_title = item.parsed_info.show_title
                     else:
-                        show_title = anime_info.get_best_title("zh-CN" if title_source == "cn" else "en-US") or anime_info.title or item.parsed_info.show_title
+                        show_title = anime_info.get_best_title("zh-CN" if title_source == "cn" else "en-US") or anime_info.title
+
+                    # 当 API 搜索失败（source_db=="local"）或返回的标题与 parser 相同
+                    # 时，show_title 可能包含集标题，需要从 parser 的 show_title 中提取干净标题
+                    is_local = getattr(anime_info, "source_db", "") == "local"
+                    if is_local or show_title == item.parsed_info.show_title:
+                        m = re_mod.search(r'^(.+)[-–—]\s(.+)$', show_title)
+                        if m:
+                            show_title = m.group(1).strip().rstrip('-–— ')
+
                     episode_title = anime_info.get_episode_title(item.parsed_info.episode, ep_lang)
+                    # 如果 API 没有集标题，尝试从 parser 的 show_title 中提取
+                    if not episode_title:
+                        m = re_mod.search(r'^(.+)[-–—]\s(.+)$', item.parsed_info.show_title)
+                        if m:
+                            episode_title = m.group(2).strip()
+
+                    # 安全性清理：去除 episode_title 首尾的破折号和空格
+                    if episode_title:
+                        episode_title = episode_title.strip().strip('-–— ')
+
                     new_name = self._generate_new_name(item, show_title, episode_title, template)
                     if new_name:
                         # 如果生成的名字和原名一样，跳过
@@ -933,8 +1008,9 @@ class MainWindow(QMainWindow):
         self._search_candidates = candidates
         self._ignore_combo_change = True
         self.search_result_combo.clear()
+        # 始终显示默认提示项
+        self.search_result_combo.addItem("— 选择搜索结果（点击切换）—", None)
         if candidates:
-            self.search_result_combo.addItem("— 选择搜索结果（点击切换）—", None)
             for c in candidates:
                 cn = c["name_cn"] or c["name"]
                 eps = c["eps"]
@@ -946,10 +1022,8 @@ class MainWindow(QMainWindow):
                     label += f" [{date}]"
                 self.search_result_combo.addItem(label, c["id"])
             self.search_result_combo.setCurrentIndex(0)  # 显示提示项
-            self.search_result_combo.setVisible(True)
-        else:
-            self.search_result_combo.setVisible(False)
         self._ignore_combo_change = False
+        self._recognition_running = False
 
     def _on_search_result_selected(self, index):
         """用户在下拉框中选择了不同的搜索结果，重新识别"""
@@ -963,6 +1037,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_recognition_running') and self._recognition_running:
             self._log("搜索正在进行中，请等待完成...")
             return
+
+        # 先终止上一个 worker，断开信号
+        if hasattr(self, 'worker') and self.worker is not None:
+            try:
+                self.worker.progress.disconnect(self._on_recognition_progress)
+                self.worker.log.disconnect(self._log)
+                self.worker.finished.disconnect(self._on_recognition_finished)
+            except (TypeError, RuntimeError):
+                pass
+            self.worker.quit()
+            self.worker = None
+
         self._recognition_running = True
 
         self._log(f"用户选择 Bangumi ID: {bangumi_id}，重新识别...")
@@ -985,12 +1071,13 @@ class MainWindow(QMainWindow):
         se_format = config.get("season_episode_format", "auto")
         se_str = get_season_episode_str(pi, fmt=se_format)
 
-        # 如果 show_title 末尾已含集标题，用正则剥离（兼容 - / -- / — 等分隔符）
+        # 如果 show_title 末尾已含集标题，用正则剥离（兼容 - / -- / — 等任意组合分隔符）
         if episode_title and episode_title.strip():
             et = re_mod.escape(episode_title.strip())
-            show_title = re_mod.sub(r'\s*[-–—]+\s*' + et + r'$', '', show_title).rstrip()
-            # 也处理无分隔符紧跟的情况
-            show_title = re_mod.sub(r'\s+' + et + r'$', '', show_title).rstrip()
+            # 匹配各种分隔符组合：空格、破折号、连字符的任意混合
+            show_title = re_mod.sub(r'[\s\-–—]+' + et + r'$', '', show_title).rstrip('-–— ')
+            # 也处理无分隔符紧跟的情况（纯空格分隔）
+            show_title = re_mod.sub(r'\s+' + et + r'$', '', show_title).rstrip('-–— ')
 
         base_name = template.replace("{title}", show_title)
         base_name = base_name.replace("{season_episode}", se_str)
@@ -1058,20 +1145,16 @@ class MainWindow(QMainWindow):
             # 使用解析出的原标题
             show_title = pi.show_title if pi.show_title else old_stem
 
-            # 离线没有每集标题 — 尝试从 show_title 末尾提取
+            # 离线没有每集标题 — 从 show_title 末尾提取（贪婪匹配最后一个破折号）
             episode_title = ""
-            m = re_mod.search(r'\s+[-–—]+\s+(.+)$', show_title)
+            m = re_mod.search(r'^(.+)[-–—]\s(.+)$', show_title)
             if m:
-                show_title = show_title[:m.start()].strip()
-                episode_title = m.group(1).strip()
+                show_title = m.group(1).strip().rstrip('-–— ')
+                episode_title = m.group(2).strip()
 
             new_name = self._generate_new_name(item, show_title, episode_title, template)
 
-            # 如果生成的名字和原名一样，跳过
-            if new_name == item.old_name:
-                item.status = "ready"
-                continue
-
+            # 始终设置 new_name，即使与原名相同 — 用户需要看到目标列始终有内容
             item.new_name = new_name
             item.new_path = Path(item.old_path).parent / new_name if item.old_path else None
             item.status = "ready"
@@ -1268,6 +1351,18 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════
 
     def resizeEvent(self, event):
+        # 保存当前侧边栏宽度，防止最大化/窗口化时 Qt 按比例缩放
+        old_sidebar = self._sidebar_width
         super().resizeEvent(event)
+        if hasattr(self, 'splitter') and self.splitter:
+            total = self.width()
+            if total > 0:
+                self.splitter.setSizes([old_sidebar, total - old_sidebar])
         if hasattr(self, 'avatar_label'):
             self._refresh_avatar()
+
+    def showEvent(self, event):
+        """窗口首次显示后刷新头像（此时 sidebar 已完成布局，width() 有效）"""
+        super().showEvent(event)
+        if hasattr(self, 'avatar_label'):
+            QTimer.singleShot(50, self._refresh_avatar)

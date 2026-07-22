@@ -266,6 +266,11 @@ class FileListWidget(QWidget):
                 new_display = "[\u7B49\u5F85\u8054\u7F51\u8BC6\u522B...]"
                 new_item = QTableWidgetItem(new_display)
                 new_item.setForeground(QColor(c["text_placeholder"]))
+            elif not new_name and item.status == "ready":
+                # 已就绪但无差异（生成名与原名相同）— 显示原名，颜色与原文件名一致
+                new_item = QTableWidgetItem(item.old_name)
+                new_item.setToolTip(item.old_name)
+                new_item.setForeground(QColor(c["text_primary"]))
             else:
                 new_item = QTableWidgetItem(new_name)
                 new_item.setToolTip(new_name)
@@ -277,7 +282,11 @@ class FileListWidget(QWidget):
                 elif item.status == "conflict":
                     new_item.setForeground(QColor(c["error"]))
                 elif item.status == "ready":
-                    new_item.setForeground(QColor(c["warning"]))
+                    # 已就绪但无差异（生成名与原名相同）— 颜色与原文件名一致
+                    if new_name == item.old_name:
+                        new_item.setForeground(QColor(c["text_primary"]))
+                    else:
+                        new_item.setForeground(QColor(c["warning"]))
                 else:
                     new_item.setForeground(QColor(c["text_secondary"]))
 

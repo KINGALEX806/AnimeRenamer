@@ -1,11 +1,21 @@
 """主题管理器 - 堤丰双形态清透配色 + 自定义点缀色 + 内置默认头像"""
 import os
+import sys
 from PySide6.QtCore import QObject, Signal
 from utils.config import load_config, set_config
 
 
+def _get_assets_dir():
+    """获取 assets 目录路径，兼容 PyInstaller 打包"""
+    if getattr(sys, 'frozen', False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "assets")
+
+
 # ── 内置默认头像路径 ────────────────────────────────────────
-_ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+_ASSETS_DIR = _get_assets_dir()
 AVATAR_DEFAULT_DARK = os.path.join(_ASSETS_DIR, "avatar_dark.png")
 AVATAR_DEFAULT_LIGHT = os.path.join(_ASSETS_DIR, "avatar_light.png")
 

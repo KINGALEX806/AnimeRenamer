@@ -69,10 +69,10 @@ def _is_likely_group(tag):
 
 def _is_episode_number(tag):
     """判断是否是纯集数标签"""
-    # 纯数字 1-200
+    # 纯数字 0-200（含第零集）
     if re.match(r'^\d{1,3}$', tag):
         n = int(tag)
-        if 1 <= n <= 200:
+        if 0 <= n <= 200:
             return True
     # 范围格式 01-02 或 01~02
     if re.match(r'^\d{1,3}[-~]\d{1,3}$', tag):
@@ -237,7 +237,7 @@ def parse_filename(filename):
         m = re.search(r'[\s_-](\d{1,3})(?:\s*[-~]\s*(\d{1,3}))?(?:\s|$)', clean_name)
         if m:
             ep_num = int(m.group(1))
-            if 1 <= ep_num <= 200 and ep_num not in [720, 1080, 480, 360, 2160]:
+            if 0 <= ep_num <= 200 and ep_num not in [720, 1080, 480, 360, 2160]:
                 info.episode = ep_num
                 if m.group(2):
                     info.episode_end = int(m.group(2))
@@ -253,7 +253,7 @@ def parse_filename(filename):
                 m = re.match(r'^(\d{1,3})(?:[-~](\d{1,3}))?$', tag_text)
                 if m:
                     ep_num = int(m.group(1))
-                    if 1 <= ep_num <= 200:
+                    if 0 <= ep_num <= 200:
                         info.episode = ep_num
                         if m.group(2):
                             info.episode_end = int(m.group(2))

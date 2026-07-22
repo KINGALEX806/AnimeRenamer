@@ -483,12 +483,20 @@ class AnimeRecognizer:
         """清理搜索标题，去除干扰项
 
         - 去除末尾季数标记 (S1, S2, Season 1 等)
+        - 去除末尾破折号分隔的集标题（仅当末尾片段含 CJK 字符时）
         - 去除首尾特殊字符和空白
         """
         t = title.strip()
         # 去除末尾季数标记
         t = re.sub(r'\s+[Ss](?:eason\s*)?\d+\s*$', '', t)
         t = re.sub(r'\s+第[一二三四五六七八九十\d]+季\s*$', '', t)
+        # 去除末尾破折号分隔的片段 — 仅当末尾片段含中日韩文字时剥离
+        # （避免误删英文副标题如 "Sword Art Online - Alicization"）
+        m = re.search(r'^(.+)\s+[-–—]+\s+([^-–—]+)$', t)
+        if m:
+            last_seg = m.group(2).strip()
+            if re.search(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', last_seg):
+                t = m.group(1).strip()
         # 去除首尾特殊字符
         t = t.strip('[]()（）_-.!?;:,\'" ')
         return t
