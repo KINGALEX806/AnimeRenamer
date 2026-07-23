@@ -17,15 +17,20 @@ DEFAULT_CONFIG = {
     "keep_language_tag": True,
     "custom_remove_keywords": [],
     "custom_keep_keywords": [],
-    "tmdb_api_key": "",
+    "tmdb_api_key": "1f54bd990f1cdfb230adb312546d765d",
     "language": "zh-CN",
     "db_primary": "bangumi",
     "db_auto_fallback": True,
+    "db_order": ["bangumi", "anilist", "themoviedb", "jikan", "tvmaze", "anidb", "thetvdb", "imdb"],
     "db_enabled": {
         "bangumi": True,
         "anilist": True,
-        "tmdb": True,
+        "themoviedb": True,
         "jikan": True,
+        "tvmaze": True,
+        "thetvdb": False,
+        "imdb": True,
+        "anidb": True,
     },
     "episode_title_language": "cn",
     "title_source": "cn",
@@ -36,6 +41,10 @@ DEFAULT_CONFIG = {
     "custom_subtitle_extensions": "",
     "sidebar_width": 240,
     "column_widths": [70, 84, 84, 400, 300],
+    "operation_mode": "rename",
+    "undo_history": [],
+    "use_absolute_episode": False,
+    "absolute_episode_offset": 0,
 }
 
 def get_config_dir():

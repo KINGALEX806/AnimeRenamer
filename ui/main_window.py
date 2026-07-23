@@ -1,4 +1,4 @@
-"""主窗口 - AnimeRenamer 堤丰双形态毛玻璃美学界面"""
+"""主窗口 - AnimeRenamer 堤丰双形态毛玻璃美学界面 + FileBot 风格增强"""
 import os
 import re as re_mod
 import subprocess
@@ -9,10 +9,10 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QStackedWidget, QSplitter,
     QStatusBar, QMessageBox, QProgressBar, QFrame, QSizePolicy,
-    QDialog, QScrollArea, QLineEdit, QComboBox
+    QDialog, QScrollArea, QLineEdit, QComboBox, QApplication, QMenu
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
-from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent, QColor, QPixmap, QIcon
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QEvent
+from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent, QColor, QPixmap, QIcon, QClipboard, QKeySequence, QAction
 
 from core.scanner import scan_folder, MediaFile
 from core.parser import parse_filename, ParsedInfo, get_season_episode_str
@@ -21,6 +21,7 @@ from core.renamer import RenameEngine, RenameItem
 from core.subtitle_matcher import match_subtitles_to_videos
 from ui.file_list import FileListWidget
 from ui.settings_panel import SettingsPanel
+from ui.episodes_panel import EpisodesPanel
 from ui.theme import theme_manager
 from ui.styles import get_stylesheet
 from utils.config import load_config, save_config, set_config
@@ -93,12 +94,14 @@ class MainWindow(QMainWindow):
     NAV_HOME = 0
     NAV_FILES = 1
     NAV_SETTINGS = 2
-    NAV_ABOUT = 3
+    NAV_EPISODES = 3
+    NAV_ABOUT = 4
 
     _NAV_LABELS = [
         "\U0001F3E0  \u9996\u9875",
         "\U0001F4C2  \u6587\u4EF6",
         "\u2699  \u8BBE\u7F6E",
+        "\U0001F4FA  \u5267\u96C6",
         "\u2139    \u5173\u4E8E",
     ]
 
@@ -127,6 +130,8 @@ class MainWindow(QMainWindow):
         self._search_candidates = []        # 当前搜索结果候选列表
         self._current_search_title = ""     # 当前搜索标题
         self._skip_candidates_fetch = False # 通过下拉框重选时跳过候选获取
+        self._operation_mode = "rename"     # 操作模式: rename | move | copy | hardlink | symlink
+        self._done_items = []               # 已完成的项（用于撤销）
 
         self.setAcceptDrops(True)
 
@@ -184,11 +189,13 @@ class MainWindow(QMainWindow):
         self.page_home = self._build_home_page()
         self.page_files = self._build_files_page()
         self.page_settings = self._build_settings_page()
+        self.page_episodes = self._build_episodes_page()
         self.page_about = self._build_about_page()
 
         self.page_stack.addWidget(self.page_home)
         self.page_stack.addWidget(self.page_files)
         self.page_stack.addWidget(self.page_settings)
+        self.page_stack.addWidget(self.page_episodes)
         self.page_stack.addWidget(self.page_about)
 
         right_layout.addWidget(self.page_stack, stretch=1)
@@ -205,7 +212,7 @@ class MainWindow(QMainWindow):
         sidebar.setMinimumWidth(180)
         sidebar.setMaximumWidth(400)
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(8, 12, 8, 10)
+        sidebar_layout.setContentsMargins(8, 12, 8, 20)
         sidebar_layout.setSpacing(0)
 
         self._build_avatar_area(sidebar_layout)
@@ -222,17 +229,46 @@ class MainWindow(QMainWindow):
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(subtitle)
 
-        sidebar_layout.addStretch(1)
+        sidebar_layout.addSpacing(12)
 
+        # 可拖拽排序的导航按钮（纯 QPushButton 版本 + 自定义拖拽）
         self.nav_buttons = []
-        for i, label in enumerate(self._NAV_LABELS):
+        self._nav_drag_src = -1      # 拖拽源按钮索引
+        self._nav_drag_start = None  # 拖拽起始位置
+        self._nav_drag_overlay = None  # 拖拽浮动覆盖层
+
+        # 加载保存的导航顺序
+        config = load_config()
+        saved_order = config.get("nav_order", [])
+        if saved_order and len(saved_order) == len(self._NAV_LABELS):
+            nav_order = saved_order
+        else:
+            nav_order = list(range(len(self._NAV_LABELS)))
+
+        # 纯 QPushButton 布局（与原始外观完全一致）
+        nav_container = QWidget()
+        nav_container.setObjectName("navContainer")
+        nav_container.setMinimumHeight(198)  # 5 按钮 × 38px + 4 × 2px 间距，防止被压缩
+        nav_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        nav_container.setStyleSheet("QWidget#navContainer { background: transparent; border: none; }")
+        nav_layout = QVBoxLayout(nav_container)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(2)
+
+        for idx in nav_order:
+            label = self._NAV_LABELS[idx]
             btn = QPushButton(label)
-            btn.setObjectName("navBtnActive" if i == self.NAV_HOME else "navBtn")
+            btn.setObjectName("navBtnActive" if idx == self._active_nav else "navBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda checked, idx=i: self._switch_nav(idx))
-            sidebar_layout.addWidget(btn)
-            sidebar_layout.addSpacing(2)
+            btn.setProperty("nav_index", idx)
+            btn.clicked.connect(lambda checked, i=idx: self._switch_nav(i))
+            btn.setFixedHeight(38)
+            btn.setMouseTracking(True)
+            btn.installEventFilter(self)
             self.nav_buttons.append(btn)
+            nav_layout.addWidget(btn)
+
+        sidebar_layout.addWidget(nav_container)
 
         sidebar_layout.addStretch(1)
 
@@ -383,6 +419,8 @@ class MainWindow(QMainWindow):
         self.search_keyword_input.setObjectName("searchKeywordInput")
         self.search_keyword_input.setFixedWidth(200)
         self.search_keyword_input.returnPressed.connect(self._start_recognition)
+        self.search_keyword_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.search_keyword_input.customContextMenuRequested.connect(self._on_search_context_menu)
         header_row.addWidget(self.search_keyword_input, 0)
 
         # 右侧区域（等宽拉伸，与左侧对称）
@@ -462,6 +500,22 @@ class MainWindow(QMainWindow):
         self.open_folder_btn.setEnabled(False)
         bottom_row.addWidget(self.open_folder_btn)
 
+        bottom_row.addSpacing(12)
+
+        # 操作模式选择器（FileBot 风格）
+        mode_label = QLabel("操作:")
+        mode_label.setObjectName("hintLabel")
+        bottom_row.addWidget(mode_label)
+        bottom_row.addSpacing(4)
+        self.operation_mode_combo = QComboBox()
+        self.operation_mode_combo.setObjectName("operationModeCombo")
+        self.operation_mode_combo.addItems([
+            "🔄 重命名", "📦 移动", "📋 复制", "🔗 硬链接", "🔗 符号链接"
+        ])
+        self.operation_mode_combo.setToolTip("选择操作模式：重命名/移动/复制/硬链接/符号链接")
+        self.operation_mode_combo.currentIndexChanged.connect(self._on_operation_mode_changed)
+        bottom_row.addWidget(self.operation_mode_combo)
+
         bottom_row.addStretch()
 
         self.file_count_label = QLabel("")
@@ -469,6 +523,17 @@ class MainWindow(QMainWindow):
         bottom_row.addWidget(self.file_count_label)
 
         bottom_row.addStretch()
+
+        # 🔄 撤销按钮
+        self.undo_btn = QPushButton("↩ 撤销")
+        self.undo_btn.setObjectName("undoBtn")
+        self.undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.undo_btn.clicked.connect(self._undo_rename)
+        self.undo_btn.setEnabled(False)
+        self.undo_btn.setToolTip("撤销最近一次重命名操作")
+        bottom_row.addWidget(self.undo_btn)
+
+        bottom_row.addSpacing(8)
 
         # 🔍 预览 + 🎬 开始重命名 — 右下角
         self.preview_btn = QPushButton("📋 预览")
@@ -515,6 +580,10 @@ class MainWindow(QMainWindow):
         self.settings_panel = SettingsPanel()
         layout.addWidget(self.settings_panel, stretch=1)
         return page
+
+    def _build_episodes_page(self):
+        self.episodes_panel = EpisodesPanel()
+        return self.episodes_panel
 
     def _build_about_page(self):
         page = QWidget()
@@ -564,6 +633,11 @@ class MainWindow(QMainWindow):
         self.settings_panel.settings_changed.connect(self._on_settings_changed)
         # 文件列表列宽变化时保存
         self.file_list.column_widths_changed.connect(self._on_column_widths_changed)
+        # 右键菜单信号
+        self.file_list.context_reset_requested.connect(self._on_context_reset)
+        self.file_list.context_remove_requested.connect(self._on_context_remove)
+        self.file_list.context_copy_old_requested.connect(self._on_context_copy_old)
+        self.file_list.context_copy_new_requested.connect(self._on_context_copy_new)
         # 防抖定时器：设置变更后 500ms 才重新生成名称
         self._settings_debounce = QTimer()
         self._settings_debounce.setSingleShot(True)
@@ -581,6 +655,8 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         if hasattr(self, 'settings_panel') and self.settings_panel:
             self.settings_panel.refresh_theme()
+        if hasattr(self, 'episodes_panel') and self.episodes_panel:
+            self.episodes_panel.refresh_theme()
         if hasattr(self, 'file_list') and self.file_list:
             self.file_list.refresh_theme()
 
@@ -601,6 +677,10 @@ class MainWindow(QMainWindow):
         self.file_list.populate(self.rename_items)
         self._update_button_states()
 
+    def _on_operation_mode_changed(self, index):
+        """操作模式切换"""
+        self._update_button_states()
+
     def _toggle_theme(self):
         theme_manager.toggle()
 
@@ -612,50 +692,177 @@ class MainWindow(QMainWindow):
 
     def _apply_nav_accent(self):
         c = theme_manager.colors
-        for i, btn in enumerate(self.nav_buttons):
-            if i == self._active_nav:
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {c["accent"]};
-                        color: #ffffff;
-                        border: none;
-                        border-radius: 10px;
-                        padding: 11px 18px;
-                        text-align: center;
-                        font-size: 13px;
-                        font-weight: bold;
-                        min-height: 38px;
-                    }}
-                """)
+        for btn in self.nav_buttons:
+            idx = btn.property("nav_index")
+            if idx == self._active_nav:
+                btn.setObjectName("navBtnActive")
             else:
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background: transparent;
-                        color: {c["text_secondary"]};
-                        border: none;
-                        border-radius: 10px;
-                        padding: 11px 18px;
-                        text-align: center;
-                        font-size: 13px;
-                        font-weight: normal;
-                        min-height: 38px;
-                    }}
-                    QPushButton:hover {{
-                        background-color: {c["sidebar_hover_bg"]};
-                        color: {c["text_primary"]};
-                    }}
-                """)
+                btn.setObjectName("navBtn")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    def _on_nav_order_changed(self, new_order):
+        """保存拖拽后的导航顺序"""
+        set_config("nav_order", new_order)
+
+    def eventFilter(self, obj, event):
+        """处理侧边栏导航按钮的拖拽排序"""
+        if obj in self.nav_buttons:
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._nav_drag_src = self.nav_buttons.index(obj)
+                    self._nav_drag_start = event.globalPosition().toPoint()
+            elif event.type() == QEvent.Type.MouseMove and self._nav_drag_src >= 0:
+                if self._nav_drag_start:
+                    delta = (event.globalPosition().toPoint() - self._nav_drag_start).manhattanLength()
+                    if delta > 10:
+                        if not self._nav_drag_overlay:
+                            self._start_nav_drag(event.globalPosition().toPoint())
+                # 实时更新 overlay 位置（使用本地坐标，流畅无卡顿）
+                if self._nav_drag_overlay:
+                    global_pos = event.globalPosition().toPoint()
+                    local_pos = self.mapFromGlobal(global_pos)
+                    self._nav_drag_overlay.move(
+                        local_pos.x() - self._nav_drag_overlay.width() // 2,
+                        local_pos.y() - self._nav_drag_overlay.height() // 2)
+                    # 高亮目标位置
+                    self._highlight_nav_drop_target(global_pos)
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                if self._nav_drag_src >= 0 and self._nav_drag_overlay:
+                    self._end_nav_drag(event.globalPosition().toPoint())
+                self._nav_drag_src = -1
+                self._nav_drag_start = None
+                self._clear_nav_highlight()
+        return super().eventFilter(obj, event)
+
+    def _start_nav_drag(self, pos):
+        """开始拖拽：创建浮动覆盖层（子 widget 方式，流畅无卡顿）"""
+        if self._nav_drag_overlay:
+            return
+        src_btn = self.nav_buttons[self._nav_drag_src]
+        c = theme_manager.colors
+        overlay = QLabel(src_btn.text(), self)
+        overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        overlay.setStyleSheet(f"""
+            QLabel {{
+                background-color: {c["accent"]};
+                color: #ffffff;
+                border: none;
+                border-radius: 10px;
+                padding: 11px 18px;
+                font-size: 13px;
+                font-weight: bold;
+                min-height: 38px;
+            }}
+        """)
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        effect = QGraphicsOpacityEffect(overlay)
+        effect.setOpacity(0.85)
+        overlay.setGraphicsEffect(effect)
+        overlay.setFixedSize(src_btn.size())
+        local_pos = self.mapFromGlobal(pos)
+        overlay.move(local_pos.x() - overlay.width() // 2,
+                     local_pos.y() - overlay.height() // 2)
+        overlay.raise_()
+        overlay.show()
+        self._nav_drag_overlay = overlay
+        self._nav_drag_start = None  # 清除防止重复触发
+
+    def _highlight_nav_drop_target(self, pos):
+        """高亮拖拽目标位置"""
+        c = theme_manager.colors
+        for i, btn in enumerate(self.nav_buttons):
+            if i == self._nav_drag_src:
+                continue
+            btn_rect = btn.mapToGlobal(btn.rect().topLeft())
+            btn_bottom = btn_rect.y() + btn.height()
+            if pos.y() >= btn_rect.y() and pos.y() <= btn_bottom:
+                if btn.property("_drop_target") != True:
+                    btn.setProperty("_drop_target", True)
+                    btn.setStyleSheet(btn.styleSheet() + f"""
+                        QPushButton {{ border: 2px dashed {c["accent"]}; }}
+                    """)
+                return
+        self._clear_nav_highlight()
+
+    def _clear_nav_highlight(self):
+        """清除所有高亮"""
+        for btn in self.nav_buttons:
+            if btn.property("_drop_target"):
+                btn.setProperty("_drop_target", False)
+                btn.setStyleSheet("")
+
+    def _end_nav_drag(self, pos):
+        """结束拖拽：计算目标位置并重排"""
+        overlay = self._nav_drag_overlay
+        self._nav_drag_overlay = None
+        if overlay:
+            overlay.hide()
+            overlay.deleteLater()
+
+        if self._nav_drag_src < 0:
+            return
+
+        # 计算目标位置：找到鼠标下方的按钮
+        target_idx = self._nav_drag_src
+        for i, btn in enumerate(self.nav_buttons):
+            if i == self._nav_drag_src:
+                continue
+            btn_rect = btn.mapToGlobal(btn.rect().topLeft())
+            btn_bottom = btn_rect.y() + btn.height()
+            btn_center = btn_rect.y() + btn.height() // 2
+            if pos.y() >= btn_rect.y() and pos.y() <= btn_bottom:
+                target_idx = i
+                break
+            elif pos.y() < btn_rect.y() and i == 0:
+                target_idx = 0
+                break
+
+        if target_idx != self._nav_drag_src:
+            self._reorder_nav(self._nav_drag_src, target_idx)
+
+        self._nav_drag_src = -1
+
+    def _reorder_nav(self, src, dst):
+        """重排导航按钮"""
+        if src == dst:
+            return
+        # 移动按钮列表
+        btn = self.nav_buttons.pop(src)
+        self.nav_buttons.insert(dst, btn)
+
+        # 重建布局
+        nav_container = self.sidebar.findChild(QWidget, "navContainer")
+        if nav_container:
+            nav_layout = nav_container.layout()
+            # 清空布局
+            while nav_layout.count():
+                item = nav_layout.takeAt(0)
+                if item.widget():
+                    nav_layout.removeWidget(item.widget())
+            # 重新添加
+            for b in self.nav_buttons:
+                nav_layout.addWidget(b)
+
+        # 保存顺序
+        order = [b.property("nav_index") for b in self.nav_buttons]
+        self._on_nav_order_changed(order)
 
     def _update_button_states(self):
         if not hasattr(self, 'rename_btn'):
             return
         ready_count = sum(1 for i in self.rename_items if i.status == "ready")
+        done_count = sum(1 for i in self.rename_items if i.status == "done")
         has_ready = ready_count > 0
         self.rename_btn.setEnabled(has_ready)
+
+        # 根据操作模式更新按钮文字
+        mode_map = {0: "重命名", 1: "移动", 2: "复制", 3: "硬链接", 4: "符号链接"}
+        mode_label = mode_map.get(self.operation_mode_combo.currentIndex(), "重命名")
         if has_ready:
-            self.rename_btn.setText(f"🎬 开始重命名 ({ready_count})")
+            self.rename_btn.setText(f"🎬 开始{mode_label} ({ready_count})")
         else:
-            self.rename_btn.setText("🎬 开始重命名")
+            self.rename_btn.setText(f"🎬 开始{mode_label}")
 
         # 预览按钮状态
         has_any = len(self.rename_items) > 0
@@ -668,6 +875,9 @@ class MainWindow(QMainWindow):
         # 打开文件夹按钮
         self.open_folder_btn.setEnabled(self.current_folder is not None)
 
+        # 撤销按钮
+        self.undo_btn.setEnabled(done_count > 0)
+
     # ══════════════════════════════════════════════════════════
     #  导航
     # ══════════════════════════════════════════════════════════
@@ -678,11 +888,6 @@ class MainWindow(QMainWindow):
 
         self._active_nav = index
         self.page_stack.setCurrentIndex(index)
-
-        for i, btn in enumerate(self.nav_buttons):
-            btn.setObjectName("navBtnActive" if i == index else "navBtn")
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
 
         self._apply_nav_accent()
 
@@ -850,6 +1055,95 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════
     #  第二步：搜索每集标题（按钮触发）
     # ══════════════════════════════════════════════════════════
+
+    def _on_search_context_menu(self, pos):
+        """搜索框中文右键菜单"""
+        c = theme_manager.colors
+        menu = QMenu(self.search_keyword_input)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {c["bg_card_solid"]};
+                color: {c["text_primary"]};
+                border: 1px solid {c["border_glow"]};
+                border-radius: 10px;
+                padding: 6px;
+            }}
+            QMenu::item {{
+                padding: 8px 28px 8px 16px;
+                border-radius: 6px;
+                margin: 2px 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {c["accent"]};
+                color: #ffffff;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {c["border"]};
+                margin: 4px 8px;
+            }}
+            QMenu::item:disabled {{
+                color: {c["text_muted"]};
+            }}
+        """)
+
+        si = self.search_keyword_input
+        has_selection = si.hasSelectedText()
+        can_undo = si.isUndoAvailable()
+        can_redo = si.isRedoAvailable()
+
+        undo_action = QAction("撤销", menu)
+        undo_action.setShortcut(QKeySequence("Ctrl+Z"))
+        undo_action.setShortcutVisibleInContextMenu(True)
+        undo_action.setEnabled(can_undo)
+        undo_action.triggered.connect(si.undo)
+        menu.addAction(undo_action)
+
+        redo_action = QAction("重做", menu)
+        redo_action.setShortcut(QKeySequence("Ctrl+Y"))
+        redo_action.setShortcutVisibleInContextMenu(True)
+        redo_action.setEnabled(can_redo)
+        redo_action.triggered.connect(si.redo)
+        menu.addAction(redo_action)
+
+        menu.addSeparator()
+
+        cut_action = QAction("剪切", menu)
+        cut_action.setShortcut(QKeySequence("Ctrl+X"))
+        cut_action.setShortcutVisibleInContextMenu(True)
+        cut_action.setEnabled(has_selection)
+        cut_action.triggered.connect(si.cut)
+        menu.addAction(cut_action)
+
+        copy_action = QAction("复制", menu)
+        copy_action.setShortcut(QKeySequence("Ctrl+C"))
+        copy_action.setShortcutVisibleInContextMenu(True)
+        copy_action.setEnabled(has_selection)
+        copy_action.triggered.connect(si.copy)
+        menu.addAction(copy_action)
+
+        paste_action = QAction("粘贴", menu)
+        paste_action.setShortcut(QKeySequence("Ctrl+V"))
+        paste_action.setShortcutVisibleInContextMenu(True)
+        paste_action.triggered.connect(si.paste)
+        menu.addAction(paste_action)
+
+        delete_action = QAction("删除", menu)
+        delete_action.setShortcut(QKeySequence("Del"))
+        delete_action.setShortcutVisibleInContextMenu(True)
+        delete_action.setEnabled(has_selection)
+        delete_action.triggered.connect(lambda: si.del_())
+        menu.addAction(delete_action)
+
+        menu.addSeparator()
+
+        select_all_action = QAction("全选", menu)
+        select_all_action.setShortcut(QKeySequence("Ctrl+A"))
+        select_all_action.setShortcutVisibleInContextMenu(True)
+        select_all_action.triggered.connect(si.selectAll)
+        menu.addAction(select_all_action)
+
+        menu.exec(si.mapToGlobal(pos))
 
     def _start_recognition(self):
         """开始联网搜索每集标题"""
@@ -1090,6 +1384,9 @@ class MainWindow(QMainWindow):
         base_name = base_name.replace("{year}", str(pi.year) if pi.year else "")
         base_name = base_name.replace("{video_info}", pi.video_info or "")
         base_name = base_name.replace("{audio_info}", pi.audio_info or "")
+        # 绝对编号（动漫常用）：{absolute}
+        abs_ep = pi.episode if pi.episode else 0
+        base_name = base_name.replace("{absolute}", f"{abs_ep:02d}" if abs_ep > 0 else "")
         base_name = re_mod.sub(r"\s+", " ", base_name).strip()
         base_name = re_mod.sub(r"\s*-\s*$", "", base_name)
         base_name = re_mod.sub(r'\[\s*\]', '', base_name)
@@ -1291,12 +1588,17 @@ class MainWindow(QMainWindow):
     def _execute_rename(self):
         ready_items = [i for i in self.rename_items if i.status == "ready"]
         if not ready_items:
-            QMessageBox.information(self, "\u63D0\u793A", "\u6CA1\u6709\u53EF\u91CD\u547D\u540D\u7684\u6587\u4EF6\u3002")
+            QMessageBox.information(self, "提示", "没有可操作的文件。")
             return
 
+        mode_map = {0: "rename", 1: "move", 2: "copy", 3: "hardlink", 4: "symlink"}
+        mode = mode_map.get(self.operation_mode_combo.currentIndex(), "rename")
+        mode_labels = {"rename": "重命名", "move": "移动", "copy": "复制", "hardlink": "硬链接", "symlink": "符号链接"}
+        mode_label = mode_labels.get(mode, "操作")
+
         reply = QMessageBox.question(
-            self, "\u786E\u8BA4\u91CD\u547D\u540D",
-            f"\u5C06\u91CD\u547D\u540D {len(ready_items)} \u4E2A\u6587\u4EF6\uFF0C\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F",
+            self, f"确认{mode_label}",
+            f"将{mode_label} {len(ready_items)} 个文件，确定继续吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -1307,36 +1609,98 @@ class MainWindow(QMainWindow):
                 item.old_path = str(Path(self.current_folder) / item.old_name)
             item.new_path = str(Path(self.current_folder) / item.new_name)
 
-        success, failed = self.rename_engine.execute_rename(ready_items)
+        result = self.rename_engine.execute_rename(ready_items, mode=mode)
+        success = result["success"]
+        failed = result["failed"]
+        conflicts = result["conflicts"]
+
         self.file_list.populate(self.rename_items)
         self._update_button_states()
+        status_msg = f"✅ {mode_label}完成: {success} 成功"
+        if failed > 0:
+            status_msg += f", {failed} 失败"
+        if conflicts > 0:
+            status_msg += f", {conflicts} 冲突"
+        self.qt_status_bar.showMessage(status_msg)
 
-        if failed:
-            QMessageBox.warning(
-                self, "\u91CD\u547D\u540D\u5B8C\u6210",
-                f"\u6210\u529F: {success} \u4E2A\n\u5931\u8D25: {failed} \u4E2A"
-            )
+        # 始终显示操作结果弹窗
+        msg = f"操作完成！\n\n成功: {success} 个\n失败: {failed} 个\n跳过: {result['skipped']} 个\n冲突: {conflicts} 个"
+        if failed > 0:
+            QMessageBox.warning(self, f"{mode_label}完成", msg)
         else:
-            self.qt_status_bar.showMessage(f"\u2705 \u6210\u529F\u91CD\u547D\u540D {success} \u4E2A\u6587\u4EF6")
+            QMessageBox.information(self, f"{mode_label}完成", msg)
 
     def _undo_rename(self):
         done_items = [i for i in self.rename_items if i.status == "done"]
         if not done_items:
-            QMessageBox.information(self, "\u63D0\u793A", "\u6CA1\u6709\u53EF\u64A4\u9500\u7684\u64CD\u4F5C\u3002")
+            QMessageBox.information(self, "提示", "没有可撤销的操作。")
             return
 
         reply = QMessageBox.question(
-            self, "\u786E\u8BA4\u64A4\u9500",
-            f"\u5C06\u64A4\u9500 {len(done_items)} \u4E2A\u6587\u4EF6\u7684\u91CD\u547D\u540D\uFF0C\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F",
+            self, "确认撤销",
+            f"将撤销 {len(done_items)} 个文件的最近操作，确定继续吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        success, failed = self.rename_engine.undo_rename(done_items)
+        result = self.rename_engine.undo_rename(done_items)
+        success = result["success"]
+        failed = result["failed"]
+
         self.file_list.populate(self.rename_items)
         self._update_button_states()
-        self.qt_status_bar.showMessage(f"\u64A4\u9500\u5B8C\u6210: {success} \u6210\u529F, {failed} \u5931\u8D25")
+        self.file_count_label.setText(f"共 {len(self.rename_items)} 个文件")
+
+        if failed > 0:
+            QMessageBox.warning(self, "撤销完成",
+                f"撤销操作完成！\n\n成功: {success} 个\n失败: {failed} 个")
+        else:
+            QMessageBox.information(self, "撤销完成",
+                f"成功撤销 {success} 个文件！")
+            self.qt_status_bar.showMessage(f"✅ 撤销完成: {success} 成功")
+
+    def _on_context_reset(self, row):
+        """右键菜单：重置目标名称为原始名称"""
+        if row < 0 or row >= len(self.rename_items):
+            return
+        item = self.rename_items[row]
+        item.new_name = item.old_name
+        item.status = "ready"
+        self.file_list.populate(self.rename_items)
+        self._update_button_states()
+        self._log(f"已重置: {item.old_name}")
+
+    def _on_context_remove(self, row):
+        """右键菜单：从列表中移除"""
+        if row < 0 or row >= len(self.rename_items):
+            return
+        item = self.rename_items.pop(row)
+        # 同步移除对应的 parsed_info
+        if row < len(self.parsed_infos):
+            self.parsed_infos.pop(row)
+        self.file_list.populate(self.rename_items)
+        self._update_button_states()
+        self.file_count_label.setText(f"共 {len(self.rename_items)} 个文件")
+        self._log(f"已移除: {item.old_name}")
+
+    def _on_context_copy_old(self, row):
+        """右键菜单：复制原文件名"""
+        if row < 0 or row >= len(self.rename_items):
+            return
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.rename_items[row].old_name)
+        self._log(f"已复制原文件名: {self.rename_items[row].old_name}")
+
+    def _on_context_copy_new(self, row):
+        """右键菜单：复制目标名称"""
+        if row < 0 or row >= len(self.rename_items):
+            return
+        item = self.rename_items[row]
+        text = item.new_name if item.new_name else item.old_name
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        self._log(f"已复制目标名称: {text}")
 
     # ══════════════════════════════════════════════════════════
     #  日志

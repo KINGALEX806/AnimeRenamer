@@ -1,11 +1,11 @@
-"""文件列表组件 - 玻璃质感高级表格，支持自由调整列宽（列宽可记忆）+ 双击编辑目标名称"""
+"""文件列表组件 - 玻璃质感高级表格，支持自由调整列宽（列宽可记忆）+ 双击编辑目标名称 + 右键菜单"""
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QLabel, QHBoxLayout, QAbstractItemView,
-    QStyledItemDelegate, QLineEdit, QTableWidget
+    QStyledItemDelegate, QLineEdit, QTableWidget, QMenu
 )
 from PySide6.QtCore import Qt, Signal, QSize, QEvent, QTimer
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QAction
 from ui.theme import theme_manager
 from utils.config import load_config, set_config
 
@@ -47,6 +47,11 @@ class FileListWidget(QWidget):
     item_selected = Signal(int)
     column_widths_changed = Signal(list)
     target_name_edited = Signal(int, str)  # row, new_name
+    context_menu_requested = Signal(int, object)  # row, QPoint (global pos)
+    context_reset_requested = Signal(int)  # row - reset target name
+    context_remove_requested = Signal(int)  # row - remove from list
+    context_copy_old_requested = Signal(int)  # row - copy old name
+    context_copy_new_requested = Signal(int)  # row - copy new name
 
     COLUMNS = ["\u7C7B\u578B", "Season", "Episode", "\u539F\u6587\u4EF6\u540D", "\u76EE\u6807\u65B0\u540D\u79F0"]
     _DEFAULT_WIDTHS = [70, 84, 84, 400, 300]
@@ -98,6 +103,10 @@ class FileListWidget(QWidget):
         # 双击编辑目标名称
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.table.cellChanged.connect(self._on_cell_changed)
+
+        # 右键菜单
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
 
         # 为列4设置自定义编辑代理
         self.table.setItemDelegateForColumn(4, EditDelegate(self.table))
@@ -181,6 +190,66 @@ class FileListWidget(QWidget):
                 if new_name:
                     self._rename_items[row].new_name = new_name
                     self.target_name_edited.emit(row, new_name)
+
+    def _on_context_menu(self, pos):
+        """右键菜单"""
+        row = self.table.rowAt(pos.y())
+        if row < 0 or row >= len(self._rename_items):
+            return
+
+        self.table.selectRow(row)
+        ritem = self._rename_items[row]
+        global_pos = self.table.viewport().mapToGlobal(pos)
+
+        menu = QMenu(self.table)
+        c = theme_manager.colors
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {c["bg_card_solid"]};
+                color: {c["text_primary"]};
+                border: 1px solid {c["border_glow"]};
+                border-radius: 10px;
+                padding: 6px;
+            }}
+            QMenu::item {{
+                padding: 8px 28px 8px 16px;
+                border-radius: 6px;
+                margin: 2px 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {c["accent"]};
+                color: #ffffff;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {c["border"]};
+                margin: 4px 8px;
+            }}
+        """)
+
+        edit_action = menu.addAction("编辑目标名称")
+        edit_action.triggered.connect(lambda: self.table.editItem(self.table.item(row, 4)))
+
+        menu.addSeparator()
+
+        reset_action = menu.addAction("重置为原始名称")
+        reset_action.triggered.connect(lambda: self.context_reset_requested.emit(row))
+
+        menu.addSeparator()
+
+        copy_old_action = menu.addAction("复制原文件名")
+        copy_old_action.triggered.connect(lambda: self.context_copy_old_requested.emit(row))
+
+        copy_new_action = menu.addAction("复制目标名称")
+        copy_new_action.triggered.connect(lambda: self.context_copy_new_requested.emit(row))
+
+        menu.addSeparator()
+
+        remove_action = menu.addAction("从列表中移除")
+        remove_action.triggered.connect(lambda: self.context_remove_requested.emit(row))
+
+        self.context_menu_requested.emit(row, global_pos)
+        menu.exec(global_pos)
 
     def get_column_widths(self):
         return [self.table.columnWidth(i) for i in range(5)]

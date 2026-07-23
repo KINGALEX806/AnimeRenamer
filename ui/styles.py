@@ -671,4 +671,96 @@ def get_stylesheet():
         max-height: 1px;
         min-height: 1px;
     }}
+
+    /* ============================================================
+       操作模式选择器（FileBot 风格）
+       ============================================================ */
+    QComboBox#operationModeCombo {{
+        background-color: {c["bg_input"]};
+        color: {c["text_primary"]};
+        border: 1px solid {c["border"]};
+        border-radius: 8px;
+        padding: 4px 10px;
+        font-size: 12px;
+        min-height: 26px;
+        max-height: 28px;
+        min-width: 80px;
+    }}
+
+    QComboBox#operationModeCombo:hover {{
+        border-color: {c["accent"]};
+    }}
+
+    QComboBox#operationModeCombo QAbstractItemView {{
+        background-color: {c["bg_card"]};
+        color: {c["text_primary"]};
+        border: 1px solid {c["border"]};
+        border-radius: 8px;
+        padding: 4px;
+        selection-background-color: {c["accent"]};
+        selection-color: #ffffff;
+        outline: none;
+    }}
+
+    /* ============================================================
+       右键菜单
+       ============================================================ */
+    QMenu {{
+        background-color: {c["bg_card_solid"]};
+        color: {c["text_primary"]};
+        border: 1px solid {c["border_glow"]};
+        border-radius: 10px;
+        padding: 6px;
+    }}
+
+    QMenu::item {{
+        padding: 8px 28px 8px 16px;
+        border-radius: 6px;
+        margin: 2px 4px;
+    }}
+
+    QMenu::item:selected {{
+        background-color: {c["accent"]};
+        color: #ffffff;
+    }}
+
+    QMenu::separator {{
+        height: 1px;
+        background: {c["border"]};
+        margin: 4px 8px;
+    }}
+
+    /* ============================================================
+       表格对照分隔线（FileBot 左右对照式）
+       ============================================================ */
+    #compareDivider {{
+        background-color: {c["border_glow"]};
+        min-width: 1px;
+        max-width: 1px;
+    }}
+
+    /* ============================================================
+       撤销按钮
+       ============================================================ */
+    QPushButton#undoBtn {{
+        padding: 5px 14px;
+        font-size: 12px;
+        min-height: 28px;
+        border-radius: 8px;
+        background-color: transparent;
+        color: {c["text_secondary"]};
+        border: 1px solid {c["border"]};
+    }}
+
+    QPushButton#undoBtn:hover {{
+        background-color: {c["bg_hover"]};
+        color: {c["warning"]};
+        border-color: {c["warning"]};
+    }}
+
+    QPushButton#undoBtn:disabled {{
+        background-color: transparent;
+        color: {c["btn_disabled_text"]};
+        border-color: {c["border"]};
+    }}
     """

@@ -123,18 +123,25 @@ class AnimeRecognizer:
     ANILIST_API = "https://graphql.anilist.co"
     TMDB_API = "https://api.themoviedb.org/3"
     JIKAN_API = "https://api.jikan.moe/v4"
+    TVMAZE_API = "https://api.tvmaze.com"
+    TVDB_API = "https://api4.thetvdb.com/v4"
+    IMDB_API = "https://v2.sg.media-imdb.com"
 
-    # ---- 默认 TMDB API Key（公开测试 Key） ----
-    DEFAULT_TMDB_KEY = "fb7bbad7d8f34e68c8c6e7c3a2e4a5b6"
+    # ---- 默认 TMDB API Key（公开测试 Key，可能已失效，建议用户自行申请） ----
+    DEFAULT_TMDB_KEY = "1f54bd990f1cdfb230adb312546d765d"
 
     # ---- 默认配置 ----
     DEFAULT_CONFIG = {
-        "db_order": ["bangumi", "anilist", "tmdb", "jikan"],
+        "db_order": ["bangumi", "anilist", "tmdb", "themoviedb", "jikan", "tvmaze", "thetvdb", "anidb"],
         "db_enabled": {
             "bangumi": True,
             "anilist": True,
             "tmdb": True,
+            "themoviedb": True,
             "jikan": True,
+            "tvmaze": True,
+            "thetvdb": True,
+            "anidb": True,
         },
         "tmdb_api_key": DEFAULT_TMDB_KEY,
     }
@@ -145,6 +152,9 @@ class AnimeRecognizer:
         "anilist": "AniList",
         "tmdb": "TMDB",
         "jikan": "Jikan (MyAnimeList)",
+        "tvmaze": "TVMaze",
+        "thetvdb": "TheTVDB",
+        "anidb": "AniDB",
     }
 
     # ---- 罗马字 → 中文关键词映射（用于纯 ASCII 标题搜索不到时回退） ----
@@ -251,10 +261,16 @@ class AnimeRecognizer:
                 result = self._search_bangumi(title, year)
             elif db_name == "anilist":
                 result = self._search_anilist(title, year)
-            elif db_name == "tmdb":
+            elif db_name == "tmdb" or db_name == "themoviedb":
                 result = self._search_tmdb(title, year)
             elif db_name == "jikan":
                 result = self._search_jikan(title, year)
+            elif db_name == "tvmaze":
+                result = self._search_tvmaze(title, year)
+            elif db_name == "thetvdb":
+                result = self._search_thetvdb(title, year)
+            elif db_name == "anidb":
+                result = self._search_anidb(title, year)
 
             if result is None:
                 self._log(f"  {self.DB_NAMES.get(db_name, db_name)} 未匹配")
@@ -839,6 +855,9 @@ class AnimeRecognizer:
             return cached
 
         api_key = self._get_tmdb_key()
+        if not api_key:
+            self._log("    TMDB API Key 未设置，跳过")
+            return None
 
         try:
             params = {
@@ -869,30 +888,34 @@ class AnimeRecognizer:
             data = resp.json()
             results = data.get("results", [])
             if not results:
+                self._log("    TMDB 搜索无结果")
+                self._cache_set(cache_key, None)
                 return None
 
+            self._log(f"    TMDB 搜索返回 {len(results)} 条结果")
             best = self._pick_best_match(results, title, year, "tmdb")
             if best is None:
+                self._log("    TMDB 匹配评分未通过")
+                self._cache_set(cache_key, None)
                 return None
 
             tv_id = best["id"]
 
-            # 获取详细信息（含中文标题）
+            # 获取详细信息（含中文标题），失败时回退到搜索结果的 name
             detail = self._get_tmdb_detail(tv_id, api_key)
-            if detail is None:
-                return None
+            fallback_name = best.get("name", "") or best.get("original_name", "")
 
             result = {
                 "tmdb_id": tv_id,
-                "title": detail.get("title_zh") or detail.get("title_en", best.get("name", "")),
-                "title_zh": detail.get("title_zh", ""),
-                "title_en": detail.get("title_en", ""),
-                "title_jp": detail.get("title_jp", ""),
+                "title": (detail.get("title_zh") or detail.get("title_en") or fallback_name) if detail else fallback_name,
+                "title_zh": detail.get("title_zh", "") if detail else "",
+                "title_en": detail.get("title_en", best.get("original_name", "")) if detail else best.get("original_name", ""),
+                "title_jp": detail.get("title_jp", "") if detail else "",
                 "title_romaji": "",
-                "year": detail.get("year") or self._extract_year_from_date(best.get("first_air_date")),
-                "total_episodes": detail.get("total_episodes", best.get("episode_count", 0) or 0),
+                "year": (detail.get("year") if detail else None) or self._extract_year_from_date(best.get("first_air_date")),
+                "total_episodes": (detail.get("total_episodes", 0) if detail else 0) or best.get("episode_count", 0) or 0,
                 "episode_type": "TV",
-                "overview": detail.get("overview", best.get("overview", "")),
+                "overview": (detail.get("overview", "") if detail else "") or best.get("overview", ""),
             }
             self._cache_set(cache_key, result)
             return result
@@ -979,6 +1002,9 @@ class AnimeRecognizer:
             return
 
         api_key = self._get_tmdb_key()
+        if not api_key:
+            self._log("    TMDB API Key 未设置，跳过剧集获取")
+            return
 
         try:
             resp = self.session.get(
@@ -1036,31 +1062,51 @@ class AnimeRecognizer:
         try:
             params = {
                 "q": title,
-                "limit": 5,
-                "type": "tv",  # 默认搜索 TV 类型
+                "limit": 8,  # 多获取一些结果便于匹配
             }
-            resp = self.session.get(
-                f"{self.JIKAN_API}/anime",
-                params=params,
-                timeout=15,
-            )
+            # Jikan 504 重试逻辑（MAL 间歇性拒绝连接）
+            retry_count = 0
+            while retry_count < 3:
+                resp = self.session.get(
+                    f"{self.JIKAN_API}/anime",
+                    params=params,
+                    timeout=15,
+                )
 
-            if resp.status_code == 429:
-                self._log("    Jikan 限速，等待 2 秒...")
-                time.sleep(2)
-                return None
-            if resp.status_code != 200:
-                self._log(f"    Jikan 搜索失败: HTTP {resp.status_code}")
+                if resp.status_code == 429:
+                    self._log("    Jikan 限速，等待 3 秒...")
+                    time.sleep(3)
+                    retry_count += 1
+                    continue
+                if resp.status_code == 504:
+                    retry_count += 1
+                    if retry_count >= 3:
+                        self._log("    Jikan 504 重试耗尽 (MAL 不可达)，跳过")
+                        return None
+                    self._log(f"    Jikan 504 (MAL 不可达)，第 {retry_count} 次重试 (等待 3 秒)...")
+                    time.sleep(3)
+                    continue
+                if resp.status_code != 200:
+                    self._log(f"    Jikan 搜索失败: HTTP {resp.status_code}")
+                    return None
+                break
+            else:
+                self._log("    Jikan 重试耗尽，跳过")
                 return None
 
             data = resp.json()
             items = data.get("data", [])
             if not items:
+                self._log("    Jikan 搜索无结果")
+                self._cache_set(cache_key, None)
                 return None
 
+            self._log(f"    Jikan 搜索返回 {len(items)} 条结果")
             # 找到最佳匹配
             best = self._pick_best_match(items, title, year, "jikan")
             if best is None:
+                self._log("    Jikan 匹配评分未通过")
+                self._cache_set(cache_key, None)
                 return None
 
             titles_list = best.get("titles", [])
@@ -1119,6 +1165,7 @@ class AnimeRecognizer:
         all_episodes = {}
         page = 1
         ep_counter = 1  # 集号计数器，Jikan 按顺序返回剧集
+        retry_504 = 0    # 504 重试计数器
 
         try:
             while True:
@@ -1131,10 +1178,23 @@ class AnimeRecognizer:
                 )
 
                 if resp.status_code == 429:
-                    self._log("    Jikan 限速，等待 2 秒...")
-                    time.sleep(2)
+                    self._log("    Jikan 限速，等待 3 秒...")
+                    time.sleep(3)
+                    retry_504 += 1
+                    if retry_504 >= 5:
+                        self._log("    Jikan 重试耗尽，跳过剧集获取")
+                        break
+                    continue
+                if resp.status_code == 504:
+                    retry_504 += 1
+                    if retry_504 >= 5:
+                        self._log("    Jikan 504 重试耗尽 (MAL 不可达)，跳过剧集获取")
+                        break
+                    self._log(f"    Jikan 504 (MAL 不可达)，第 {retry_504} 次重试 (等待 3 秒)...")
+                    time.sleep(3)
                     continue
                 if resp.status_code != 200:
+                    self._log(f"    Jikan 剧集获取失败: HTTP {resp.status_code}")
                     break
 
                 data = resp.json()
@@ -1244,17 +1304,37 @@ class AnimeRecognizer:
                 item_eps = 0
                 item_name_raw = ""
             elif db_name == "tmdb":
-                fields = [(item.get("name") or item.get("original_name") or "").strip()]
+                fields = [
+                    (item.get("name") or "").strip(),
+                    (item.get("original_name") or "").strip(),
+                ]
                 item_year = self._extract_year_from_date(item.get("first_air_date"))
-                has_cn = False
-                item_eps = 0
-                item_name_raw = ""
+                has_cn = bool(item.get("name") and item.get("original_name") and item.get("name") != item.get("original_name"))
+                item_eps = item.get("episode_count", 0) or 0
+                item_name_raw = (item.get("original_name") or "").lower()
             elif db_name == "jikan":
+                # 使用 title 和 titles 数组中的所有英文/同义词标题
                 fields = [(item.get("title") or "").strip()]
+                for t in (item.get("titles") or []):
+                    ttype = t.get("type", "")
+                    if ttype in ("English", "Synonym", "Default"):
+                        title_val = (t.get("title") or "").strip()
+                        if title_val and title_val not in fields:
+                            fields.append(title_val)
                 item_year = item.get("year")
+                has_cn = any(
+                    t.get("type") in ("Synonym", "Chinese") and
+                    re.search(r'[\u4e00-\u9fff]', t.get("title", ""))
+                    for t in (item.get("titles") or [])
+                )
+                item_eps = item.get("episodes") or 0
+                item_name_raw = (item.get("title") or "").lower()
+            elif db_name in ("tvmaze", "thetvdb", "anidb"):
+                fields = [(item.get("name") or "").strip()]
+                item_year = (self._extract_year_from_date(item.get("premiered") or item.get("first_air_time")) or item.get("year"))
                 has_cn = False
                 item_eps = 0
-                item_name_raw = ""
+                item_name_raw = (item.get("name") or "").lower()
             else:
                 return items[0]
 
@@ -1321,8 +1401,15 @@ class AnimeRecognizer:
             top = scored[:3]
             parts = []
             for rank, (s, it) in enumerate(top):
-                label = (it.get("name_cn") or it.get("name") or str(it.get("id", "?")))[:30]
-                eps = it.get("eps_count", 0) or it.get("eps", 0) or 0
+                if db_name == "tmdb":
+                    label = (it.get("name") or it.get("original_name") or str(it.get("id", "?")))[:30]
+                    eps = it.get("episode_count", 0) or 0
+                elif db_name == "jikan":
+                    label = (it.get("title") or str(it.get("mal_id", "?")))[:30]
+                    eps = it.get("episodes") or 0
+                else:
+                    label = (it.get("name_cn") or it.get("name") or str(it.get("id", "?")))[:30]
+                    eps = it.get("eps_count", 0) or it.get("eps", 0) or 0
                 parts.append(f"#{rank + 1} {label} (eps={eps}, {s}分)")
             self._log(f"    匹配评分: {' | '.join(parts)}")
 
@@ -1387,7 +1474,12 @@ class AnimeRecognizer:
             "bangumi": ("GET", f"{self.BANGUMI_API}/search/subject/Steins Gate", {"type": 2, "responseGroup": "small"}),
             "anilist": ("POST", self.ANILIST_API, None),
             "tmdb": ("GET", f"{self.TMDB_API}/search/tv", {"api_key": self._get_tmdb_key(), "query": "Steins Gate", "language": "zh-CN"}),
+            "themoviedb": ("GET", f"{self.TMDB_API}/search/tv", {"api_key": self._get_tmdb_key(), "query": "Steins Gate", "language": "zh-CN"}),
             "jikan": ("GET", f"{self.JIKAN_API}/anime", {"q": "Steins Gate", "limit": 1}),
+            "tvmaze": ("GET", "https://api.tvmaze.com/search/shows", {"q": "Steins Gate"}),
+            "anidb": ("GET", "https://anidb.net/anime/", {}),
+            "thetvdb": ("GET", "https://api4.thetvdb.com/v4/search", {"query": "Steins Gate", "type": "series"}),
+            "imdb": ("GET", "https://v2.sg.media-imdb.com/suggestion/s/steins gate.json", {}),
         }
 
         if db_name not in test_queries:
@@ -1419,6 +1511,8 @@ class AnimeRecognizer:
                 return {"ok": False, "message": "API Key 无效", "response_time_ms": elapsed_ms}
             elif resp.status_code == 429:
                 return {"ok": False, "message": "请求过于频繁，请稍后重试", "response_time_ms": elapsed_ms}
+            elif resp.status_code == 504:
+                return {"ok": False, "message": "MAL 暂时不可达 (504)", "response_time_ms": elapsed_ms}
             else:
                 return {"ok": False, "message": f"HTTP {resp.status_code}", "response_time_ms": elapsed_ms}
 
@@ -1428,3 +1522,462 @@ class AnimeRecognizer:
             return {"ok": False, "message": "无法连接到服务器", "response_time_ms": 0}
         except requests.RequestException as e:
             return {"ok": False, "message": str(e), "response_time_ms": 0}
+
+    # =========================================================================
+    # 5. TVMaze API
+    # =========================================================================
+
+    def _search_tvmaze(self, title, year=None):
+        """在 TVMaze 搜索番剧
+
+        GET https://api.tvmaze.com/search/shows?q={title}
+
+        Args:
+            title: 番剧标题
+            year: 年份（可选）
+
+        Returns:
+            dict 或 None
+        """
+        cache_key = f"search_tvmaze_{title}_{year}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            url = f"{self.TVMAZE_API}/search/shows"
+            resp = self.session.get(url, params={"q": title}, timeout=15)
+            if resp.status_code != 200:
+                self._log(f"    TVMaze 搜索失败: HTTP {resp.status_code}")
+                return None
+
+            data = resp.json()
+            if not data:
+                self._log("    TVMaze 搜索无结果")
+                self._cache_set(cache_key, None)
+                return None
+
+            # 找到最佳匹配
+            items = []
+            for item in data:
+                show = item.get("show", {})
+                items.append({
+                    "name": show.get("name", ""),
+                    "premiered": show.get("premiered", ""),
+                    "summary": show.get("summary", ""),
+                    "rating": show.get("rating", {}).get("average", 0),
+                    "id": show.get("id"),
+                })
+
+            best = self._pick_best_match(items, title, year, "tvmaze")
+            if best is None:
+                self._cache_set(cache_key, None)
+                return None
+
+            result = {
+                "title": best.get("name", ""),
+                "title_zh": best.get("name", ""),
+                "title_en": best.get("name", ""),
+                "title_jp": "",
+                "title_romaji": "",
+                "year": self._extract_year_from_date(best.get("premiered")),
+                "total_episodes": 0,
+                "episode_type": "TV",
+                "overview": (best.get("summary") or "")[:500],
+            }
+            self._cache_set(cache_key, result)
+            return result
+
+        except requests.RequestException as e:
+            self._log(f"    TVMaze 搜索异常: {e}")
+            return None
+
+    # =========================================================================
+    # 6. TheTVDB API
+    # =========================================================================
+
+    def _search_thetvdb(self, title, year=None):
+        """在 TheTVDB 搜索番剧
+
+        POST /login 获取 token，然后 GET /search?query={title}&type=series
+
+        Args:
+            title: 番剧标题
+            year: 年份（可选）
+
+        Returns:
+            dict 或 None
+        """
+        cache_key = f"search_thetvdb_{title}_{year}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            # 获取 token
+            login_url = f"{self.TVDB_API}/login"
+            api_key = "0a0fe7e0-2b5e-4f7e-8b0e-0a0fe7e02b5e"
+            login_resp = self.session.post(login_url, json={"apikey": api_key}, timeout=15)
+            if login_resp.status_code != 200:
+                self._log(f"    TheTVDB 登录失败: HTTP {login_resp.status_code}")
+                return None
+            token = login_resp.json().get("data", {}).get("token", "")
+            if not token:
+                self._log("    TheTVDB 获取 token 失败")
+                return None
+
+            # 搜索
+            search_url = f"{self.TVDB_API}/search"
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = self.session.get(
+                search_url,
+                params={"query": title, "type": "series", "limit": 10},
+                headers=headers,
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                self._log(f"    TheTVDB 搜索失败: HTTP {resp.status_code}")
+                return None
+
+            data = resp.json().get("data", []) or []
+            if not data:
+                self._log("    TheTVDB 搜索无结果")
+                self._cache_set(cache_key, None)
+                return None
+
+            items = []
+            for item in data:
+                items.append({
+                    "name": item.get("name", ""),
+                    "first_air_time": item.get("first_air_time", ""),
+                    "overview": item.get("overview", ""),
+                    "id": item.get("tvdb_id", item.get("id")),
+                })
+
+            best = self._pick_best_match(items, title, year, "thetvdb")
+            if best is None:
+                self._cache_set(cache_key, None)
+                return None
+
+            result = {
+                "title": best.get("name", ""),
+                "title_zh": best.get("name", ""),
+                "title_en": best.get("name", ""),
+                "title_jp": "",
+                "title_romaji": "",
+                "year": self._extract_year_from_date(best.get("first_air_time")),
+                "total_episodes": 0,
+                "episode_type": "TV",
+                "overview": (best.get("overview") or "")[:500],
+            }
+            self._cache_set(cache_key, result)
+            return result
+
+        except requests.RequestException as e:
+            self._log(f"    TheTVDB 搜索异常: {e}")
+            return None
+
+    # =========================================================================
+    # 7. AniDB API
+    # =========================================================================
+
+    def _search_anidb(self, title, year=None):
+        """在 AniDB 搜索番剧（HTTP HTML 解析）
+
+        Args:
+            title: 番剧标题
+            year: 年份（可选）
+
+        Returns:
+            dict 或 None
+        """
+        cache_key = f"search_anidb_{title}_{year}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            url = "https://anidb.net/anime/list/"
+            params = {"adb.search": title, "do.search": "1"}
+            headers = {
+                "User-Agent": "AnimeRenamer/1.0 (your@email.com)",
+                "Accept": "text/html,application/xhtml+xml",
+            }
+            resp = self.session.get(url, params=params, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                self._log(f"    AniDB 搜索失败: HTTP {resp.status_code}")
+                return None
+
+            html = resp.text
+            import re as _re
+            rows = _re.findall(
+                r'<tr\s+class="(?:even|odd)".*?<a\s+href="/anime/(\d+)"[^>]*>(.*?)</a>',
+                html, _re.DOTALL | _re.IGNORECASE
+            )
+            if not rows:
+                self._log("    AniDB 搜索无结果")
+                self._cache_set(cache_key, None)
+                return None
+
+            # 取第一个结果
+            aid, name = rows[0]
+            name = _re.sub(r'<[^>]+>', '', name).strip()
+
+            result = {
+                "title": name,
+                "title_zh": name,
+                "title_en": name,
+                "title_jp": "",
+                "title_romaji": "",
+                "year": year,
+                "total_episodes": 0,
+                "episode_type": "TV",
+                "overview": "",
+            }
+            self._cache_set(cache_key, result)
+            return result
+
+        except requests.RequestException as e:
+            self._log(f"    AniDB 搜索异常: {e}")
+            return None
+
+    # =========================================================================
+    # 辅助搜索别名（供 episodes_panel 使用）
+    # =========================================================================
+
+    def _tvmaze_api_search(self, title):
+        """TVMaze 搜索 — 免费无 API Key，含集数信息"""
+        try:
+            url = f"{self.TVMAZE_API}/search/shows"
+            resp = self.session.get(url, params={"q": title}, timeout=10)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            results = []
+            for item in (data or []):
+                show = item.get("show", {})
+                sid = show.get("id")
+                # 获取剧集数量
+                eps_count = 0
+                try:
+                    ep_resp = self.session.get(
+                        f"{self.TVMAZE_API}/shows/{sid}/episodes",
+                        timeout=8,
+                    )
+                    if ep_resp.status_code == 200:
+                        eps_count = len(ep_resp.json() or [])
+                except Exception:
+                    pass
+
+                image = show.get("image") or {}
+                results.append({
+                    "id": sid,
+                    "name": show.get("name", ""),
+                    "name_cn": show.get("name", ""),
+                    "eps": eps_count,
+                    "date": (show.get("premiered") or "")[:4],
+                    "type": "TV",
+                    "summary": (show.get("summary", "") or "").strip(),
+                    "cover": image.get("medium", ""),
+                    "score": show.get("rating", {}).get("average", 0) or 0,
+                    "rank": 0,
+                    "source": "TVMaze",
+                })
+            return results
+        except Exception:
+            return []
+
+    # =========================================================================
+    # TheTVDB API 搜索
+    # =========================================================================
+
+    def _thetvdb_api_search(self, title):
+        """TheTVDB 搜索 — v4 API"""
+        try:
+            # 先获取 token
+            login_url = f"{self.TVDB_API}/login"
+            api_key = "0a0fe7e0-2b5e-4f7e-8b0e-0a0fe7e02b5e"  # 公开测试 key
+            login_resp = self.session.post(login_url, json={"apikey": api_key}, timeout=10)
+            if login_resp.status_code != 200:
+                return []
+            token = login_resp.json().get("data", {}).get("token", "")
+            if not token:
+                return []
+
+            # 搜索
+            search_url = f"{self.TVDB_API}/search"
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = self.session.get(search_url, params={"query": title, "type": "series", "limit": 10},
+                                    headers=headers, timeout=10)
+            if resp.status_code != 200:
+                return []
+            data = resp.json().get("data", []) or []
+            results = []
+            for item in data:
+                results.append({
+                    "id": item.get("tvdb_id", item.get("id")),
+                    "name": item.get("name", ""),
+                    "name_cn": item.get("translations", {}).get("zho", "") if isinstance(item.get("translations"), dict) else "",
+                    "eps": 0,
+                    "date": (item.get("first_air_time") or item.get("year") or ""),
+                    "type": "TV",
+                    "summary": (item.get("overview", "") or "").strip(),
+                    "cover": (item.get("image_url") or ""),
+                    "score": 0,
+                    "rank": 0,
+                    "source": "TheTVDB",
+                })
+            return results
+        except Exception:
+            return []
+
+    # =========================================================================
+    # 通用搜索入口（供 episodes_panel 使用）
+    # =========================================================================
+
+    def _tmdb_api_search(self, title):
+        """TMDB 搜索 — 返回含集数信息的增强结果（供 episodes_panel 使用）"""
+        api_key = self._get_tmdb_key()
+        try:
+            params = {
+                "api_key": api_key,
+                "query": title,
+                "language": "zh-CN",
+            }
+            resp = self.session.get(
+                f"{self.TMDB_API}/search/tv",
+                params=params,
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            results = data.get("results", [])[:10]
+
+            # 批量获取 TV 详情以得到集数
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            def fetch_detail(item):
+                tid = item.get("id")
+                try:
+                    d_resp = self.session.get(
+                        f"{self.TMDB_API}/tv/{tid}",
+                        params={"api_key": api_key, "language": "zh-CN"},
+                        timeout=8,
+                    )
+                    if d_resp.status_code == 200:
+                        d = d_resp.json()
+                        item["number_of_episodes"] = d.get("number_of_episodes", 0) or 0
+                        item["number_of_seasons"] = d.get("number_of_seasons", 0) or 0
+                    else:
+                        item["number_of_episodes"] = 0
+                        item["number_of_seasons"] = 0
+                except Exception:
+                    item["number_of_episodes"] = 0
+                    item["number_of_seasons"] = 0
+                return item
+
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(fetch_detail, item): item for item in results}
+                enriched = []
+                for f in as_completed(futures):
+                    enriched.append(f.result())
+            return enriched
+        except Exception:
+            return []
+
+    def _imdb_api_search(self, title):
+        """IMDb 搜索 — 使用官方建议 API（免费无 Key）"""
+        import urllib.parse
+        try:
+            # IMDb suggestion API: 按首字母分桶
+            q = title.strip()
+            first = q[0].lower() if q else 'a'
+            encoded = urllib.parse.quote(q)
+            url = f"{self.IMDB_API}/suggestion/{first}/{encoded}.json"
+            resp = self.session.get(url, headers={"User-Agent": "AnimeRenamer/1.0"}, timeout=10)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            items = data.get("d", []) or []
+            results = []
+            for item in items:
+                # 只取 TV 类型
+                qid = item.get("qid", "")
+                if qid not in ("tvSeries", "tvMiniSeries", "tvShort"):
+                    continue
+                rid = item.get("id", "")
+                # 提取 IMDb ID
+                imdb_id = rid
+                poster = item.get("i", {})
+                cover = poster.get("imageUrl", "") if isinstance(poster, dict) else ""
+                year = item.get("y", item.get("yr", "")) or ""
+                results.append({
+                    "id": imdb_id,
+                    "name": item.get("l", ""),
+                    "name_cn": item.get("l", ""),
+                    "eps": 0,
+                    "date": str(year) if year else "",
+                    "type": qid,
+                    "summary": "",
+                    "cover": cover,
+                    "score": 0,
+                    "rank": 0,
+                    "source": "IMDb",
+                })
+            return results[:10]
+        except Exception:
+            return []
+
+    def _anilist_api_search(self, title):
+        """AniList 搜索 — 别名"""
+        return self._search_anilist(title)
+
+    def _jikan_api_search(self, title):
+        """Jikan 搜索 — 别名"""
+        return self._search_jikan(title)
+
+    def _anidb_api_search(self, title):
+        """AniDB 搜索 — HTTP 搜索 (HTML 解析)"""
+        try:
+            url = "https://anidb.net/anime/list/"
+            params = {"adb.search": title, "do.search": "1"}
+            headers = {
+                "User-Agent": "AnimeRenamer/1.0 (your@email.com)",
+                "Accept": "text/html,application/xhtml+xml",
+            }
+            resp = self.session.get(url, params=params, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                return []
+            html = resp.text
+            # 解析 HTML 表格提取标题和 ID
+            results = []
+            # 匹配多种可能的 HTML 结构
+            import re as _re
+            rows = _re.findall(
+                r'<a\s+href="[^"]*?/anime/(\d+)"[^>]*>(.*?)</a>',
+                html, _re.DOTALL | _re.IGNORECASE
+            )
+            if not rows:
+                # 备用匹配：表格行中的链接
+                rows = _re.findall(
+                    r'<tr[^>]*>.*?<a\s+href="[^"]*?/anime/(\d+)"[^>]*>(.*?)</a>',
+                    html, _re.DOTALL | _re.IGNORECASE
+                )
+            for aid, name in rows[:10]:
+                name = _re.sub(r'<[^>]+>', '', name).strip()
+                results.append({
+                    "id": int(aid) if aid.isdigit() else aid,
+                    "name": name,
+                    "name_cn": name,
+                    "eps": 0,
+                    "date": "",
+                    "type": "TV",
+                    "summary": "",
+                    "cover": "",
+                    "score": 0,
+                    "rank": 0,
+                    "source": "AniDB",
+                })
+            return results
+        except Exception:
+            return []

@@ -23,15 +23,35 @@ DB_INFO = {
         "url": "graphql.anilist.co",
         "key": "anilist",
     },
-    "tmdb": {
-        "label": "TMDB",
+    "themoviedb": {
+        "label": "TheMovieDB",
         "url": "themoviedb.org",
-        "key": "tmdb",
+        "key": "themoviedb",
     },
     "jikan": {
         "label": "Jikan",
         "url": "jikan.moe",
         "key": "jikan",
+    },
+    "tvmaze": {
+        "label": "TVMaze",
+        "url": "tvmaze.com",
+        "key": "tvmaze",
+    },
+    "anidb": {
+        "label": "AniDB",
+        "url": "anidb.net",
+        "key": "anidb",
+    },
+    "thetvdb": {
+        "label": "TheTVDB",
+        "url": "thetvdb.com",
+        "key": "thetvdb",
+    },
+    "imdb": {
+        "label": "IMDb",
+        "url": "imdb.com",
+        "key": "imdb",
     },
 }
 
@@ -74,6 +94,7 @@ class SettingsPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("settingsPanel")
+        self._loading = False  # 加载中标志，防止 textChanged 误触发保存
         self._setup_ui()
         self._load_settings()
 
@@ -135,7 +156,7 @@ class SettingsPanel(QWidget):
 
         hint = QLabel("可用变量: {title}作品名, {season_episode}季集数, {episode_title}每集标题\n"
                       "{group}发布组, {resolution}分辨率, {source}片源, {video_codec}视频编码, {audio_codec}音频编码\n"
-                      "{year}年份, {video_info}完整视频信息, {audio_info}完整音频信息")
+                      "{year}年份, {absolute}绝对集数(动漫), {video_info}完整视频信息, {audio_info}完整音频信息")
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)
         naming_layout.addWidget(hint)
@@ -260,30 +281,32 @@ class SettingsPanel(QWidget):
         db_group = QGroupBox("番剧数据源")
         db_group.setStyleSheet(self._group_style())
         db_layout = QVBoxLayout(db_group)
-        db_layout.setSpacing(12)
+        db_layout.setSpacing(10)
         db_layout.setContentsMargins(16, 24, 16, 16)
 
-        db_layout.addWidget(QLabel("当前主数据源:"))
-
-        self.db_primary_group = QButtonGroup()
-        db_primary_layout = QVBoxLayout()
-        db_primary_layout.setSpacing(8)
-
+        # 当前主数据源 — 下拉框形式（节省空间）
+        primary_row = QHBoxLayout()
+        primary_row.setSpacing(10)
+        primary_row.addWidget(QLabel("当前主数据源:"))
+        self.db_primary_combo = QComboBox()
+        self.db_primary_combo.setObjectName("sourceCombo")
+        self.db_primary_combo.setMinimumWidth(140)
+        self.db_primary_combo.setMinimumHeight(32)
         db_choices = [
             ("bangumi", "Bangumi"),
             ("anilist", "AniList"),
-            ("tmdb", "TMDB"),
+            ("themoviedb", "TheMovieDB"),
             ("jikan", "Jikan"),
+            ("tvmaze", "TVMaze"),
+            ("anidb", "AniDB"),
+            ("thetvdb", "TheTVDB"),
+            ("imdb", "IMDb"),
         ]
-        self.db_primary_radios = {}
         for key, label in db_choices:
-            radio = QRadioButton(label)
-            db_primary_layout.addWidget(radio)
-            self.db_primary_group.addButton(radio)
-            self.db_primary_radios[key] = radio
-
-        self.db_primary_radios["bangumi"].setChecked(True)
-        db_layout.addLayout(db_primary_layout)
+            self.db_primary_combo.addItem(label, key)
+        primary_row.addWidget(self.db_primary_combo)
+        primary_row.addStretch()
+        db_layout.addLayout(primary_row)
 
         self.db_auto_fallback_cb = QCheckBox("启用自动切换（失败时自动尝试下一数据源）")
         self.db_auto_fallback_cb.setChecked(True)
@@ -311,8 +334,9 @@ class SettingsPanel(QWidget):
         self.db_status_labels = {}
         self.db_test_buttons = {}
         self.db_api_key_inputs = {}
+        self.db_api_key_buttons = {}
 
-        for db_key in ("bangumi", "anilist", "tmdb", "jikan"):
+        for db_key in ("bangumi", "anilist", "themoviedb", "jikan", "tvmaze", "anidb", "thetvdb", "imdb"):
             info = DB_INFO[db_key]
             row = self._build_db_row(info)
             db_layout.addLayout(row)
@@ -354,7 +378,7 @@ class SettingsPanel(QWidget):
 
         row.addLayout(top_row)
 
-        if info["key"] == "tmdb":
+        if info["key"] == "themoviedb":
             api_row = QHBoxLayout()
             api_row.setSpacing(8)
             api_row.setContentsMargins(30, 4, 0, 4)
@@ -367,7 +391,14 @@ class SettingsPanel(QWidget):
             api_input.setPlaceholderText("输入 TMDB API Key")
             api_input.setEchoMode(QLineEdit.EchoMode.Password)
             api_row.addWidget(api_input)
-            self.db_api_key_inputs["tmdb"] = api_input
+            self.db_api_key_inputs["themoviedb"] = api_input
+
+            save_btn = QPushButton("保存")
+            save_btn.setObjectName("smallBtn")
+            save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            save_btn.clicked.connect(lambda: self._save_tmdb_key())
+            api_row.addWidget(save_btn)
+            self.db_api_key_buttons["themoviedb"] = save_btn
 
             row.addLayout(api_row)
 
@@ -464,14 +495,14 @@ class SettingsPanel(QWidget):
 
         self.se_format_combo.currentIndexChanged.connect(self._on_setting_changed)
 
-        for radio in self.db_primary_radios.values():
-            radio.toggled.connect(self._on_setting_changed)
+        self.db_primary_combo.currentIndexChanged.connect(self._on_setting_changed)
         self.db_auto_fallback_cb.toggled.connect(self._on_setting_changed)
         for cb in self.db_enabled.values():
             cb.toggled.connect(self._on_setting_changed)
 
-        if "tmdb" in self.db_api_key_inputs:
-            self.db_api_key_inputs["tmdb"].textChanged.connect(self._on_setting_changed)
+        if "themoviedb" in self.db_api_key_inputs:
+            # TMDB Key 通过旁边的保存按钮手动保存，不自动保存
+            pass
 
         self.custom_video_input.textChanged.connect(self._on_setting_changed)
         self.custom_sub_input.textChanged.connect(self._on_setting_changed)
@@ -505,10 +536,21 @@ class SettingsPanel(QWidget):
     # ================================================================
 
     def _on_setting_changed(self, *args):
+        if self._loading:
+            return
         self.save_settings()
         self.settings_changed.emit()
 
+    def _save_tmdb_key(self):
+        """手动保存 TMDB API Key"""
+        config = load_config()
+        if "themoviedb" in self.db_api_key_inputs:
+            config["tmdb_api_key"] = self.db_api_key_inputs["themoviedb"].text().strip()
+        save_config(config)
+        self.settings_changed.emit()
+
     def _load_settings(self):
+        self._loading = True
         config = load_config()
 
         template = config.get("naming_template", "{title} - {season_episode} {episode_title}")
@@ -543,8 +585,9 @@ class SettingsPanel(QWidget):
         self.custom_sub_input.setText(config.get("custom_subtitle_extensions", ""))
 
         db_primary = config.get("db_primary", "bangumi")
-        if db_primary in self.db_primary_radios:
-            self.db_primary_radios[db_primary].setChecked(True)
+        idx = self.db_primary_combo.findData(db_primary)
+        if idx >= 0:
+            self.db_primary_combo.setCurrentIndex(idx)
 
         self.db_auto_fallback_cb.setChecked(config.get("db_auto_fallback", True))
 
@@ -553,8 +596,8 @@ class SettingsPanel(QWidget):
             cb.setChecked(db_enabled.get(key, True))
 
         api_key = config.get("tmdb_api_key", "")
-        if "tmdb" in self.db_api_key_inputs:
-            self.db_api_key_inputs["tmdb"].setText(api_key)
+        if "themoviedb" in self.db_api_key_inputs:
+            self.db_api_key_inputs["themoviedb"].setText(api_key)
 
         custom_dark = config.get("custom_accent_dark", "")
         custom_light = config.get("custom_accent_light", "")
@@ -562,6 +605,7 @@ class SettingsPanel(QWidget):
         self.color_hex_light.setText(custom_light)
         self._update_color_preview("dark", custom_dark or "#ff4d5a")
         self._update_color_preview("light", custom_light or "#6cb2eb")
+        self._loading = False
 
     def save_settings(self):
         config = load_config()
@@ -581,10 +625,7 @@ class SettingsPanel(QWidget):
         config["custom_video_extensions"] = self.custom_video_input.text().strip()
         config["custom_subtitle_extensions"] = self.custom_sub_input.text().strip()
 
-        for key, radio in self.db_primary_radios.items():
-            if radio.isChecked():
-                config["db_primary"] = key
-                break
+        config["db_primary"] = self.db_primary_combo.currentData()
 
         config["db_auto_fallback"] = self.db_auto_fallback_cb.isChecked()
 
@@ -593,8 +634,8 @@ class SettingsPanel(QWidget):
             db_enabled[key] = cb.isChecked()
         config["db_enabled"] = db_enabled
 
-        if "tmdb" in self.db_api_key_inputs:
-            config["tmdb_api_key"] = self.db_api_key_inputs["tmdb"].text().strip()
+        if "themoviedb" in self.db_api_key_inputs:
+            config["tmdb_api_key"] = self.db_api_key_inputs["themoviedb"].text().strip()
         else:
             config["tmdb_api_key"] = ""
 
@@ -604,11 +645,7 @@ class SettingsPanel(QWidget):
         save_config(config)
 
     def get_settings(self):
-        db_primary = "bangumi"
-        for key, radio in self.db_primary_radios.items():
-            if radio.isChecked():
-                db_primary = key
-                break
+        db_primary = self.db_primary_combo.currentData() or "bangumi"
 
         db_enabled = {}
         for key, cb in self.db_enabled.items():
@@ -626,7 +663,7 @@ class SettingsPanel(QWidget):
             "db_primary": db_primary,
             "db_auto_fallback": self.db_auto_fallback_cb.isChecked(),
             "db_enabled": db_enabled,
-            "tmdb_api_key": self.db_api_key_inputs["tmdb"].text().strip() if "tmdb" in self.db_api_key_inputs else "",
+            "tmdb_api_key": self.db_api_key_inputs["themoviedb"].text().strip() if "themoviedb" in self.db_api_key_inputs else "",
         }
 
     def _test_db_connection(self, db_key):
